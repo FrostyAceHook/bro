@@ -25,8 +25,8 @@ def singleton(cls):
 
 def frozen(cls):
     """
-    Disables creating new object attributes of the given class
-    (outside the `__init__` method).
+    Disables creating or deleting new object attributes of the
+    given class (outside the `__init__` method).
     - class decorator.
     """
 
@@ -41,14 +41,18 @@ def frozen(cls):
         self._in_init -= 1
 
     def __setattr__(self, name, value):
-        if getattr(self, "_in_init", 1):
-            cooked = False
-        elif name not in self.__dict__:
+        if not getattr(self, "_in_init", 1) and name not in self.__dict__:
             raise AttributeError(f"cannot add attribute {repr(name)} to a frozen instance")
         super(cls, self).__setattr__(name, value)
 
+    def __delattr__(self, name):
+        if not getattr(self, "_in_init", 1):
+            raise AttributeError(f"cannot delete attribute {repr(name)} from a frozen instance")
+        super(cls, self).__delattr__(name)
+
     cls.__init__ = __init__
     cls.__setattr__ = __setattr__
+    cls.__delattr__ = __delattr__
     return cls
 
 
@@ -329,23 +333,22 @@ def simulate_burn(s, tank_cyl):
     dt = s.integration_dt
     Cd = s.injector_discharge_coeff
     Ainj = s.injector_orifice_area
-    T0 = s.environment_temperature
-    V_l = tank_cyl.volume() * s.ox_volume_fill_frac
-    V_v = tank_cyl.volume() * (1 - s.ox_volume_fill_frac)
-    m0_l = V_l * PropsSI("D", "T", T0, "Q", 0, s.ox_type)
-    m0_v = V_v * PropsSI("D", "T", T0, "Q", 1, s.ox_type)
-    s0_u = m0_v / (m0_l + m0_v)
+    T0_u = s.environment_temperature
+    V0_l_u = tank_cyl.volume() * s.ox_volume_fill_frac
+    V0_v_u = tank_cyl.volume() * (1 - s.ox_volume_fill_frac)
+    m0_l_u = V0_l_u * PropsSI("D", "T", T0_u, "Q", 0, s.ox_type)
+    m0_v_u = V0_v_u * PropsSI("D", "T", T0_u, "Q", 1, s.ox_type)
+    x0_u = m0_v_u / (m0_l_u + m0_v_u)
 
     s.tank_volume = tank_cyl.volume()
-    s.ox_initial_mass = m0_l + m0_v
+    s.ox_initial_mass = m0_l_u + m0_v_u
 
-    P_u = [PropsSI("P", "T", T0, "Q", s0_u, s.ox_type)]
+    P_u = [PropsSI("P", "T", T0_u, "Q", x0_u, s.ox_type)]
     P_d = [s.injector_initial_pressure_ratio * P_u[0]]
-    # P_d = [100e3]
-    m_l_u = [m0_l]
-    m_v_u = [m0_v]
-    T_u = [T0]
-    T_d = [T0]
+    T_u = [T0_u]
+    T_d = [T0_u]
+    m_l_u = [m0_l_u]
+    m_v_u = [m0_v_u]
     m_d = [0.0]
     mdot_inj = []
 
@@ -523,18 +526,27 @@ def simulate_burn(s, tank_cyl):
             # remaining so we drain the fluid dregs by linear continuations of the
             # previous derivatives (aka maintain old "momentum" for a few steps).
             elif m_l_u[-1] > 0.0:
-                m_l_u.append(2*m_l_u[-1] - m_l_u[-2])
-                m_v_u.append(2*m_v_u[-1] - m_v_u[-2])
-                m_d.append(2*m_d[-1] - m_d[-2])
-                T_u.append(2*T_u[-1] - T_u[-2])
-                T_d.append(2*T_d[-1] - T_d[-2])
-                P_u.append(2*P_u[-1] - P_u[-2])
-                P_d.append(2*P_d[-1] - P_d[-2])
-                mdot_inj.append(2*mdot_inj[-1] - mdot_inj[-2])
+                def cont(X):
+                    if len(X == 0):
+                        raise ValueError("cannot extrapolate empty")
+                    if len(X) == 1:
+                        X.append(x[-1])
+                    else:
+                        dx = X[-1] - X[-2]
+                        dx = max(dx, -X[-1])
+                        X.append(X[-1] + dx)
+                cont(m_l_u)
+                cont(m_v_u)
+                cont(m_d)
+                cont(T_u)
+                cont(T_d)
+                cont(P_u)
+                cont(P_d)
+                cont(mdot_inj)
 
-                mdot_SPI_s.append(2*mdot_SPI_s[-1] - mdot_SPI_s[-2])
-                mdot_HEM_s.append(2*mdot_HEM_s[-1] - mdot_HEM_s[-2])
-                V_u_s.append(2*V_u_s[-1] - V_u_s[-2])
+                cont(mdot_SPI_s)
+                cont(mdot_HEM_s)
+                cont(V_u_s)
 
             # Eventually vapour draining:
             else:
