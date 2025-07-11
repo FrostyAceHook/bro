@@ -8,7 +8,9 @@ from scipy.optimize import root_scalar
 
 def singleton(cls):
     """
-    Returns a single instantiation of the given class, and prevents further creation of the class.
+    Returns a single instantiation of the given class, and prevents
+    further creation of the class.
+    - class decorator.
     """
     instance = cls()
     def throw(cls, *args, **kwargs):
@@ -23,7 +25,8 @@ def singleton(cls):
 
 def frozen(cls):
     """
-    Disables creating new object attributes of the given class (outside the `__init__` method).
+    Disables creating new object attributes of the given class
+    (outside the `__init__` method).
     - class decorator.
     """
 
@@ -61,6 +64,16 @@ class OUTPUT:
 @frozen
 class Sys:
     def __init__(s):
+        # All dependant variables initially set to ellipsis. Note that the
+        # choice of "basis" variables (the independant variables that are
+        # either input or output) is arbitrary, but some make significantly
+        # more sense than others (i.e. the relationship is difficult to
+        # inverse). Also note that the decision between assigning an
+        # independant variable as input and output is generally arbitrary
+        # (so long as controlled by us and not the weather or contest for
+        # example), and the only real difference is that output variables
+        # are swept over a range and the optimal choice is kept.
+
         s.locked_mass = INPUT # [kg]
         s.locked_length = INPUT # [m]
         s.locked_local_com = INPUT # [m]
@@ -73,15 +86,15 @@ class Sys:
         s.tank_wall_thickness = ... # [m]
         s.tank_wall_mass = ... # [kg]
         s.tank_volume = ... # [m^3]
-        s.tank_temperature = ... # [K]
-        s.tank_pressure = ... # [Pa]
+        s.tank_temperature = ... # [K, over time]
+        s.tank_pressure = ... # [Pa, over time]
 
         s.ox_type = INPUT # must be "N2O"
         s.ox_volume_fill_frac = INPUT # [-]
         s.ox_initial_mass = ... # [kg]
-        s.ox_mass = ... # [kg]
-        s.ox_mass_liquid = ... # [kg]
-        s.ox_mass_vapour = ... # [kg]
+        s.ox_mass = ... # [kg, over time]
+        s.ox_mass_liquid = ... # [kg, over time]
+        s.ox_mass_vapour = ... # [kg, over time]
         s.ox_com = ... # [m]
 
         s.mov_mass = INPUT # [kg]
@@ -96,11 +109,11 @@ class Sys:
         s.injector_discharge_coeff = INPUT # [-]
         s.injector_orifice_area = OUTPUT # [m^2]
         s.injector_initial_pressure_ratio = INPUT # [-]
-        s.injector_mass_flow_rate = ... # [kg/s]
+        s.injector_mass_flow_rate = ... # [kg/s, over time]
 
         s.cc_diameter = OUTPUT # [m]
-        s.cc_temperature = ... # [K]
-        s.cc_pressure = ... # [Pa]
+        s.cc_temperature = ... # [K, over time]
+        s.cc_pressure = ... # [Pa, over time]
         s.cc_pre_length = ... # [m]
         s.cc_post_length = ... # [m]
         s.cc_length = ... # [m]
@@ -115,7 +128,7 @@ class Sys:
         s.fuel_thickness = OUTPUT # [m]
         s.fuel_density = ... # [kg/m^3]
         s.fuel_initial_mass = ... # [kg]
-        s.fuel_mass = ... # [kg]
+        s.fuel_mass = ... # [kg, over time]
         s.fuel_com = ... # [m]
 
         s.nozzle_exit_area = OUTPUT # [m^2]
@@ -125,18 +138,18 @@ class Sys:
         s.nozzle_com = ... # [m]
         s.nozzle_mass = ... # [kg]
         s.nozzle_thrust_efficiency = INPUT # [-]
-        s.nozzle_thrust = ... # [N]
+        s.nozzle_thrust = ... # [N, over time]
 
         s.rocket_target_apogee = INPUT # [m]
         s.rocket_diameter = INPUT # [m]
         s.rocket_length = ... # [m]
         s.rocket_dry_mass = ... # [kg]
-        s.rocket_mass = ... # [kg]
-        s.rocket_com = ... # [m]
+        s.rocket_mass = ... # [kg, over time]
+        s.rocket_com = ... # [m, over time]
         s.rocket_drag_coeff = ... # [idk]
         s.rocket_stability = INPUT # [-]
-        s.rocket_net_force = ... # [N]
-        s.rocket_altitude = ... # [m]
+        s.rocket_net_force = ... # [N, over time]
+        s.rocket_altitude = ... # [m, over time]
 
         s.environment_temperature = INPUT # [K]
         s.burn_time = ... # [s]
@@ -334,9 +347,9 @@ def simulate_burn(s, tank_cyl):
     T_u = [T0]
     T_d = [T0]
     m_d = [0.0]
+    mdot_inj = []
 
     # debugging:
-    mdot_s = []
     mdot_SPI_s = []
     mdot_HEM_s = []
     V_u_s = []
@@ -380,7 +393,7 @@ def simulate_burn(s, tank_cyl):
                 dm_l_u = -dm_d
 
 
-                if False:
+                if True:
                     # Method attempting to root-find new equil temp from enthalpy
                     # conservation, but breaks towards the end? (breaks at a similar
                     # time to the HEM model).
@@ -431,7 +444,7 @@ def simulate_burn(s, tank_cyl):
                         #     if dif < 0.01:
                         #         raise
                     except ValueError as e:
-                        print(current_time)
+                        print(f"root-finding new T failed at: {current_time:.5g}")
                         # eX = np.linspace(T_u[-1] - 0.5, T_u[-1] + 0.5, 100)
                         # eY = [Hresidual(x) for x in eX]
                         # plt.figure()
@@ -500,8 +513,8 @@ def simulate_burn(s, tank_cyl):
                 P_d.append(P_d[-1]) # TODO: dont assume constant
                 if P_d[-1] < 100e3:
                     P_d[-1] = 100e3
+                mdot_inj.append(mdot)
 
-                mdot_s.append(mdot)
                 mdot_SPI_s.append(mdot_SPI)
                 mdot_HEM_s.append(mdot_HEM)
                 V_u_s.append(V_l + V_v)
@@ -517,8 +530,8 @@ def simulate_burn(s, tank_cyl):
                 T_d.append(2*T_d[-1] - T_d[-2])
                 P_u.append(2*P_u[-1] - P_u[-2])
                 P_d.append(2*P_d[-1] - P_d[-2])
+                mdot_inj.append(2*mdot_inj[-1] - mdot_inj[-2])
 
-                mdot_s.append(2*mdot_s[-1] - mdot_s[-2])
                 mdot_SPI_s.append(2*mdot_SPI_s[-1] - mdot_SPI_s[-2])
                 mdot_HEM_s.append(2*mdot_HEM_s[-1] - mdot_HEM_s[-2])
                 V_u_s.append(2*V_u_s[-1] - V_u_s[-2])
@@ -542,6 +555,7 @@ def simulate_burn(s, tank_cyl):
     s.ox_mass_liquid = np.array(m_l_u)
     s.ox_mass_vapour = np.array(m_v_u)
     s.ox_mass = s.ox_mass_liquid + s.ox_mass_vapour
+    s.injector_mass_flow_rate = np.array(mdot_inj)
 
     plotme = [
         (s.tank_pressure, "Tank pressure", "Pressure [Pa]"),
@@ -551,7 +565,7 @@ def simulate_burn(s, tank_cyl):
         (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]"),
         (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]"),
         (s.ox_mass_vapour/s.ox_mass, "Tank quality", "Mass [kg]"),
-        (mdot_s, "Injector mass flow rate", "Mass flow rate [kg/s]"),
+        (s.injector_mass_flow_rate, "Injector mass flow rate", "Mass flow rate [kg/s]"),
         # (mdot_SPI_s, "SPI", "Mass flow rate [kg/s]"),
         # (mdot_HEM_s, "HEM", "Mass flow rate [kg/s]"),
         (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]"),
