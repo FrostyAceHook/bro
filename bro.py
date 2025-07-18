@@ -87,6 +87,7 @@ class Sys:
         s.tank_com = ... # [m]
         s.tank_wall_density = INPUT # [kg/m^3]
         s.tank_wall_yield_strength = INPUT # [Pa]
+        s.tank_wall_specific_heat_capacity = INPUT # [J/kg/K]
         s.tank_wall_thickness = ... # [m]
         s.tank_wall_mass = ... # [kg]
         s.tank_volume = ... # [m^3]
@@ -321,294 +322,307 @@ class Cylinder:
 
 
 
-def simulate_burn(s, tank_cyl):
+def simulate_burn(s, top):
+    """
+    Simulates the motor burn, with tank venting and combustion chamber
+    combusting. Also does the tank properties like mass and such.
+    """
     assert s.ox_type == "N2O"
 
-    # 0 = initial
-    # l = liquid
-    # v = vapour
-    # u = upstream (tank)
-    # d = downstream (cc)
+    # legend (shoutout charle):
+    # X0 = initial
+    # X_l = liquid
+    # X_v = vapour
+    # X_u = upstream (tank)
+    # X_d = downstream (cc)
+    # dX = time derivative
+    # DX = discrete change
 
-    dt = s.integration_dt
+    Dt = s.integration_dt
     Cd = s.injector_discharge_coeff
     Ainj = s.injector_orifice_area
     T0_u = s.environment_temperature
-    V0_l_u = tank_cyl.volume() * s.ox_volume_fill_frac
-    V0_v_u = tank_cyl.volume() * (1 - s.ox_volume_fill_frac)
-    m0_l_u = V0_l_u * PropsSI("D", "T", T0_u, "Q", 0, s.ox_type)
-    m0_v_u = V0_v_u * PropsSI("D", "T", T0_u, "Q", 1, s.ox_type)
-    x0_u = m0_v_u / (m0_l_u + m0_v_u)
+    P0_u = PropsSI("P", "T", T0_u, "Q", 0, "N2O")
 
-    s.tank_volume = tank_cyl.volume()
+
+    # Now that we have pressure, we can establish the tank walls.
+    tank_wall_cyl = Cylinder.pipe(s.tank_length, outer_diameter=s.rocket_diameter)
+    tank_wall_cyl.set_thickness_for_stress(P0_u, s.tank_wall_yield_strength)
+    tank_wall_end_cyl = Cylinder.solid(tank_wall_cyl.thickness,
+                                       tank_wall_cyl.outer_diameter)
+    tank_cyl = Cylinder.solid(s.tank_length, tank_wall_cyl.inner_diameter)
+
+    s.tank_com = tank_wall_cyl.thickness + tank_wall_cyl.com(top)
+    s.tank_wall_thickness = tank_wall_cyl.thickness
+    s.tank_wall_mass = tank_wall_cyl.mass(s.tank_wall_density) \
+                     + 2 * tank_wall_end_cyl.mass(s.tank_wall_density)
+    new_top = top + s.tank_length + 2 * tank_wall_cyl.thickness
+
+    # Now that we have the tank fully defined, determine initial ox levels.
+    V_u = tank_cyl.volume()
+    V0_l_u = V_u * s.ox_volume_fill_frac
+    V0_v_u = V_u * (1 - s.ox_volume_fill_frac)
+    m0_l_u = V0_l_u * PropsSI("D", "T", T0_u, "Q", 0, "N2O")
+    m0_v_u = V0_v_u * PropsSI("D", "T", T0_u, "Q", 1, "N2O")
+    x0_u = m0_v_u / (m0_l_u + m0_v_u)
+    # Heat capacity of tank walls.
+    Cpwall = s.tank_wall_specific_heat_capacity * s.tank_wall_mass
+
+    # Justa coupel more sys properties.
+    s.tank_volume = V_u
     s.ox_initial_mass = m0_l_u + m0_v_u
 
-    P_u = [PropsSI("P", "T", T0_u, "Q", x0_u, s.ox_type)]
-    P_d = [s.injector_initial_pressure_ratio * P_u[0]]
-    T_u = [T0_u]
-    T_d = [T0_u]
-    m_l_u = [m0_l_u]
-    m_v_u = [m0_v_u]
-    m_d = [0.0]
-    mdot_inj = []
 
-    # debugging:
-    mdot_SPI_s = []
-    mdot_HEM_s = []
-    V_u_s = []
+    @singleton
+    class debugme:
+        def __init__(self):
+            self.state = {
+                "V_l_u": ([], "Volume [m^3]"),
+                "V_v_u": ([], "Volume [m^3]"),
+                "propV_u": ([], "Volume [m^3]"),
+            }
+        def __setitem__(self, name, value):
+            self.state[name][0].append(value)
 
-    current_time = 0
+    def df_liquid(m_l_u, m_v_u, T_u, P_d):
+        """
+        ONLY VALID WHEN LIQUID DRAINING.
+        Returns the time derivatives of all input variables.
+        """
+
+        # Tank is saturated.
+        P_u = PropsSI("P", "T", T_u, "Q", 0, "N2O")
+
+        # Single-phase incompressible model (with Beta = 0):
+        # (assuming tank liquid density as the "incompressible" density)
+        rho_l_u = PropsSI("D", "P", P_u, "Q", 0, "N2O")
+        mdot_SPI = Cd * Ainj * np.sqrt(2 * rho_l_u * (P_u - P_d))
+
+        # Homogenous equilibrium model:
+        x_u = m_v_u / (m_l_u + m_v_u)
+        s_u = PropsSI("S", "P", P_u, "Q", x_u, s.ox_type)
+        s_l_d = PropsSI("S", "P", P_d, "Q", 0, "N2O")
+        s_v_d = PropsSI("S", "P", P_d, "Q", 1, "N2O")
+        x_d = (s_u - s_l_d) / (s_v_d - s_l_d)
+        h_u = PropsSI("H", "P", P_u, "Q", x_u, "N2O")
+        h_d = PropsSI("H", "P", P_d, "Q", x_d, "N2O")
+        if h_u < h_d: # its been known to happen.
+            h_u = h_d # mdot_HEM -> 0 as m_l_u -> 0, but consistently breaks earlier.
+        rho_d = PropsSI("D", "P", P_d, "Q", x_d, "N2O")
+        mdot_HEM = Cd * Ainj * rho_d * np.sqrt(2 * (h_u - h_d))
+
+        # Generalised non-homogenous non-equilibrium model:
+        # (assuming that P_sat is upstream saturation, and so is alaways
+        #  =P_u since its saturated??????)
+        # P_sat = PropsSI("P", "T", T_d[-1], "Q", 1, "N2O")
+        # kappa = np.sqrt((P_u - P_d) / (P_sat - P_d))
+        kappa = 1
+        k_NHNE = 1 / (1 + kappa)
+        dminj = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE
+
+
+        # To determine temperature and vapourised mass derivatives,
+        # we're going to have to use: our brain.
+        #  V = const.
+        #  m_l / rho_l + m_v / rho_v = const.
+        #  d/dt (m_l / rho_l + m_v / rho_v) = 0
+        #  d/dt (m_l / rho_l) + d/dt (m_v / rho_v) = 0
+        #  0 = (dm_l * rho_l - m_l * drho_l) / rho_l**2  [quotient rule]
+        #    + (dm_v * rho_v - m_v * drho_v) / rho_v**2
+        # dm_l = -dminj - dm_v  [injector and vapourisation]
+        #  0 = ((-dminj - dm_v) * rho_l - m_l * drho_l) / rho_l**2
+        #    + (dm_v * rho_v - m_v * drho_v) / rho_v**2
+        #  0 = -dminj / rho_l
+        #    - dm_v / rho_l
+        #    - m_l * drho_l / rho_l**2
+        #    + dm_v / rho_v
+        #    - m_v * drho_v / rho_v**2
+        #  0 = dm_v * (1/rho_v - 1/rho_l)
+        #    - dminj / rho_l
+        #    - m_l * drho_l / rho_l**2
+        #    - m_v * drho_v / rho_v**2
+        # drho = d/dt (rho) = d/dT (rho) * dT/dt  [chain rule]
+        # drhodT = d/dT (rho)
+        #  0 = dm_v * (1/rho_v - 1/rho_l)
+        #    - dminj / rho_l
+        #    - m_l * dT * drhodT_l / rho_l**2
+        #    - m_v * dT * drhodT_v / rho_v**2
+        #  dm_v = (dminj / rho_l
+        #         + m_l * dT * drhodT_l / rho_l**2
+        #         + m_v * dT * drhodT_v / rho_v**2
+        #         ) / (1/rho_v - 1/rho_l)
+        #  dm_v = dminj / rho_l / (1/rho_v - 1/rho_l)
+        #       + dT / (1/rho_v - 1/rho_l) * (m_l * drhodT_l / rho_l**2
+        #                                   + m_v * drhodT_v / rho_v**2)
+        # let:
+        #   foo = dminj / rho_l / (1/rho_v - 1/rho_l)
+        #   bar = (m_l * drhodT_l / rho_l**2
+        #        + m_v * drhodT_v / rho_v**2) / (1/rho_v - 1/rho_l)
+        #  dm_v = foo + dT * bar
+        # So, dm_v depends on dT but dT also depends on dm_v:
+        #  dT = dE / Cp  [open system energy change]
+        #  dT = dEvap / Cp  [assuming adiabatic]
+        #  dT = (hf - hg) * dm_v / Cp  [wrong, see "OH BLOODY HELL"]
+        # let: hgf = hf - hg
+        # OH BLOODY HELL hgf is also a function of time
+        # lets take a step back.
+        #  Evap = m_v * hgf
+        #  dEvap = d/dt (m_v * hgf)
+        #  dEvap = hgf * dm_v + m_v * d/dt (hgf)
+        # d/dt (hgf) = d/dT (hgf) * dT/dt  [chain rule]
+        # dhgfdT = d/dT (hgf)
+        # so:
+        #  dT = dEvap / Cp
+        #  dT = (dm_v * hgf + m_v * dT * dhgfdT) / Cp
+        # Oh hey its just simultaneous equations. substitution.
+        #  Cp * dT = hgf * dm_v + m_v * dT * dhgfdT
+        #  Cp * dT = hgf * (foo + dT * bar) + m_v * dT * dhgfdT
+        #  dT * (Cp - hgf * bar - m_v * dhgfdT) = hgf * foo
+        # => dT = hgf * foo / (Cp - hgf * bar - m_v * dhgfdT)
+        # insane.
+
+        DT = 0.01 # use for numerical derivatives over temp.
+
+        rho_l_u = PropsSI("D", "T", T_u, "Q", 0, "N2O")
+        rho_v_u = PropsSI("D", "T", T_u, "Q", 1, "N2O")
+        drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, "N2O") - rho_l_u) / DT
+        drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, "N2O") - rho_v_u) / DT
+
+        Cp_l_u = m_l_u * PropsSI("C", "T", T_u, "Q", 0, "N2O")
+        Cp_v_u = m_v_u * PropsSI("C", "T", T_u, "Q", 1, "N2O")
+        Cp_u = Cp_l_u + Cp_v_u + Cpwall # including wall heat mass.
+
+        hgf_u = (PropsSI("H", "T", T_u, "Q", 0, "N2O")
+               - PropsSI("H", "T", T_u, "Q", 1, "N2O"))
+        dhgfdT_u = (PropsSI("H", "T", T_u + DT, "Q", 0, "N2O")
+                  - PropsSI("H", "T", T_u + DT, "Q", 1, "N2O")
+                  - hgf_u) / DT
+
+        foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
+        bar = (m_l_u * drhodT_l_u / rho_l_u**2
+             + m_v_u * drhodT_v_u / rho_v_u**2) / (1/rho_v_u - 1/rho_l_u)
+
+        dT_u = hgf_u * foo / (Cp_u - hgf_u * bar - m_v_u * dhgfdT_u)
+
+        dm_v_u = foo + dT_u * bar
+        dm_l_u = -dminj - dm_v_u
+
+
+
+        # TODO: sim cc
+        dT_d = 0.0
+        dP_d = 0.0
+
+
+
+        # Debug me:
+        V_l_u = m_l_u / PropsSI("D", "T", T_u, "Q", 0, "N2O")
+        V_v_u = m_v_u / PropsSI("D", "T", T_u, "Q", 1, "N2O")
+        debugme["V_l_u"] = V_l_u
+        debugme["V_v_u"] = V_v_u
+        debugme["propV_u"] = (V_l_u + V_v_u) / V_u
+
+
+        return dm_l_u, dm_v_u, dT_u, dT_d, dP_d
 
     try:
-        while True:
-            current_time += dt
-            if current_time > 120:
-                break
+        state = [
+            [m0_l_u],
+            [m0_v_u],
+            [T0_u],
+            [s.injector_initial_pressure_ratio * P0_u],
+        ]
+        dstate0 = None
+        current_time = 0.0
+        while current_time < 80.0:
+            current_time += Dt
 
-            # Initially liquid draining.
-            if m_l_u[-1] > 0.02:
-
-                # Single-phase incompressible model (with Beta = 0):
-                # (assuming tank liquid density as the "incompressible" density)
-                rho_l_u = PropsSI("D", "P", P_u[-1], "Q", 0, s.ox_type)
-                mdot_SPI = Cd * Ainj * np.sqrt(2 * rho_l_u * (P_u[-1] - P_d[-1]))
-                # Homogenous equilibrium model:
-                x_u = m_v_u[-1] / (m_l_u[-1] + m_v_u[-1])
-                s_u = PropsSI("S", "P", P_d[-1], "Q", x_u, s.ox_type)
-                s_l_d = PropsSI("S", "P", P_d[-1], "Q", 0, s.ox_type)
-                s_v_d = PropsSI("S", "P", P_d[-1], "Q", 1, s.ox_type)
-                x_d = (s_u - s_l_d) / (s_v_d - s_l_d)
-                h_u = PropsSI("H", "P", P_u[-1], "Q", x_u, s.ox_type)
-                h_d = PropsSI("H", "P", P_d[-1], "Q", x_d, s.ox_type)
-                if h_u < h_d: # its been known to happen.
-                    h_u = h_d # mdot_HEM -> 0 as m_l_u -> 0, but consistently breaks earlier.
-                rho_d = PropsSI("D", "P", P_d[-1], "Q", x_d, s.ox_type)
-                mdot_HEM = Cd * Ainj * rho_d * np.sqrt(2 * (h_u - h_d))
-                # Generalised non-homogenous non-equilibrium model:
-                # (assuming downstream saturation pressure as the P_sat)
-                P_sat = PropsSI("P", "T", T_d[-1], "Q", 1, s.ox_type)
-                kappa = np.sqrt((P_u[-1] - P_d[-1]) / (P_sat - P_d[-1]))
-                k_NHNE = 1 / (1 + kappa)
-                mdot = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE
-
-                # Discrete mass change this time step.
-                dm_d = min(mdot * dt, m_l_u[-1])
-                dm_l_u = -dm_d
-
-
-                if True:
-                    # Method attempting to root-find new equil temp from enthalpy
-                    # conservation, but breaks towards the end? (breaks at a similar
-                    # time to the HEM model).
-
-                    # System energy after fluid leaving.
-                    h_l_u = PropsSI("H", "T", T_u[-1], "Q", 0, s.ox_type)
-                    h_v_u = PropsSI("H", "T", T_u[-1], "Q", 1, s.ox_type)
-                    H_u = (m_l_u[-1] + dm_l_u) * h_l_u + m_v_u[-1] * h_v_u
-
-                    # Energy change due to convection.
-                    # Convection coefficients (TODO: calc for real):
-                    hc_l = 200
-                    hc_v = 5
-                    # Contact area of each:
-                    V_l = (m_l_u[-1] + dm_l_u) / PropsSI("D", "T", T_u[-1], "Q", 0, s.ox_type)
-                    V_v = m_v_u[-1] / PropsSI("D", "T", T_u[-1], "Q", 1, s.ox_type) # TODO: unused (except debugging)
-                    A_l = tank_cyl.surface_area(cutoff=V_l/tank_cyl.volume())
-                    A_v = tank_cyl.surface_area() - A_l
-                    # Energy transferred:
-                    H_u += hc_l * A_l * (s.environment_temperature - T_u[-1])
-                    H_u += hc_v * A_v * (s.environment_temperature - T_u[-1])
-
-                    # Volume change due to fluid leaving.
-                    dV_u = dm_l_u / PropsSI("D", "T", T_u[-1], "Q", 0, s.ox_type)
-
-                    # Solve for the new tank temperature + mass distribution which matches the new energy.
-                    def Hresidual(T):
-                        #  net(dV) = 0
-                        #  dV - dm_v / rho_l + dm_v / rho_v = 0
-                        # => dm_v = dV / (1/rho_l - 1/rho_v)
-                        rho_l = PropsSI("D", "T", T, "Q", 0, s.ox_type)
-                        rho_v = PropsSI("D", "T", T, "Q", 1, s.ox_type)
-                        dm_v = dV_u / (1.0/rho_l - 1.0/rho_v)
-                        dm_l = dm_l_u - dm_v
-                        h_l = PropsSI("H", "T", T, "Q", 0, s.ox_type)
-                        h_v = PropsSI("H", "T", T, "Q", 1, s.ox_type)
-                        H = (m_l_u[-1] + dm_l) * h_l + (m_v_u[-1] + dm_v) * h_v
-                        return H - H_u
-                    try:
-                        soln = root_scalar(Hresidual, bracket=[T_u[-1] - 0.5, T_u[-1] + 0.5])
-                        dT_u = soln.root - T_u[-1]
-                        # dif = 0.2
-                        # try:
-                        #     soln = root_scalar(Hresidual, bracket=[T_u[-1] - dif, T_u[-1] + dif])
-                        #     dT_u = soln.root - T_u[-1]
-                        # except ValueError:
-                        #     dif /= 2
-                        #     if dif < 0.01:
-                        #         raise
-                    except ValueError as e:
-                        print(f"root-finding new T failed at: {current_time:.5g}")
-                        # eX = np.linspace(T_u[-1] - 0.5, T_u[-1] + 0.5, 100)
-                        # eY = [Hresidual(x) for x in eX]
-                        # plt.figure()
-                        # plt.plot(eX, eY)
-                        # plt.show()
-                        # plt.close()
-                        # Assume no temp change if failed to root.
-                        dT_u = 0
-
-                    # Account for evap (which was calced in residual but not counted).
-                    rho_l_u = PropsSI("D", "T", T_u[-1] + dT_u, "Q", 0, s.ox_type)
-                    rho_v_u = PropsSI("D", "T", T_u[-1] + dT_u, "Q", 1, s.ox_type)
-                    dm_v_u = dV_u / (1.0/rho_l_u - 1.0/rho_v_u)
-                    dm_l_u -= dm_v_u
-
-                else:
-                    # old method using C_p values (dont think it logically works but
-                    # results *look* more plausible). Also it doesnt perfectly convserve
-                    # volume bc the volume conservation uses previous temp, but like
-                    # even using new temp wouldn't be perfect.
-
-                    # Mass and energy change from liquid vapourising to remain at sat pressure.
-                    #  dV = 0
-                    #  dm_l / rho_l + dm_v / rho_v = 0
-                    #  (dm_l_injector - dm_v) / rho_l + dm_v / rho_v = 0
-                    #  ((dm_l_injector - dm_v) rho_v + dm_v rho_l) / (rho_l rho_v) = 0
-                    # => dm_v = dm_l_injector rho_v / (rho_v - rho_l)
-                    rho_l_u = PropsSI("D", "T", T_u[-1], "Q", 0, s.ox_type)
-                    rho_v_u = PropsSI("D", "T", T_u[-1], "Q", 1, s.ox_type)
-                    dm_v_u = dm_l_u * rho_v_u / (rho_v_u - rho_l_u)
-                    dm_l_u -= dm_v_u
-                    h_l_u = PropsSI("H", "T", T_u[-1], "Q", 0, s.ox_type)
-                    h_v_u = PropsSI("H", "T", T_u[-1], "Q", 1, s.ox_type)
-                    dU_u = (h_v_u - h_l_u) * (-dm_v_u)
-
-                    # Energy change due to convection.
-                    # Convection coefficients (TODO: calc for real):
-                    hc_l = 200
-                    hc_v = 5
-                    # Contact area of each:
-                    V_l = m_l_u[-1] / PropsSI("D", "T", T_u[-1], "Q", 0, s.ox_type)
-                    V_v = m_v_u[-1] / PropsSI("D", "T", T_u[-1], "Q", 1, s.ox_type)
-                    A_l = tank_cyl.surface_area(cutoff=V_l/tank_cyl.volume())
-                    A_v = tank_cyl.surface_area() - A_l
-                    # Energy transferred:
-                    dU_u += hc_l * A_l * (s.environment_temperature - T_u[-1])
-                    dU_u += hc_v * A_v * (s.environment_temperature - T_u[-1])
-
-                    # Tank temperature change due to energy change.
-                    c_l_u = PropsSI("C", "T", T_u[-1], "Q", 0, s.ox_type)
-                    c_v_u = PropsSI("C", "T", T_u[-1], "Q", 1, s.ox_type)
-                    C_u = m_l_u[-1] * c_l_u + m_v_u[-1] * c_v_u
-                    dT_u = dU_u / C_u
-
-
-                # Tank pressure re-stablise to saturation pressure of new temperature.
-                dP_u = PropsSI("P", "T", T_u[-1] + dT_u, "Q", 0, s.ox_type) - P_u[-1]
-
-                # Do new state.
-                m_l_u.append(m_l_u[-1] + dm_l_u)
-                m_v_u.append(m_v_u[-1] + dm_v_u)
-                m_d.append(m_d[-1] + dm_d)
-                T_u.append(T_u[-1] + dT_u)
-                T_d.append(T_d[-1]) # TODO: dont assume constant
-                P_u.append(P_u[-1] + dP_u)
-                P_d.append(P_d[-1]) # TODO: dont assume constant
-                if P_d[-1] < 100e3:
-                    P_d[-1] = 100e3
-                mdot_inj.append(mdot)
-
-                mdot_SPI_s.append(mdot_SPI)
-                mdot_HEM_s.append(mdot_HEM)
-                V_u_s.append(V_l + V_v)
-
-            # Little bit dodgy, but the calcs break down with small amounts of liquid
-            # remaining so we drain the fluid dregs by linear continuations of the
-            # previous derivatives (aka maintain old "momentum" for a few steps).
-            elif m_l_u[-1] > 0.0:
-                def cont(X):
-                    if len(X == 0):
-                        raise ValueError("cannot extrapolate empty")
-                    if len(X) == 1:
-                        X.append(x[-1])
-                    else:
-                        dx = X[-1] - X[-2]
-                        dx = max(dx, -X[-1])
-                        X.append(X[-1] + dx)
-                cont(m_l_u)
-                cont(m_v_u)
-                cont(m_d)
-                cont(T_u)
-                cont(T_d)
-                cont(P_u)
-                cont(P_d)
-                cont(mdot_inj)
-
-                cont(mdot_SPI_s)
-                cont(mdot_HEM_s)
-                cont(V_u_s)
-
-            # Eventually vapour draining:
+            # If liquid in that thang.
+            if state[0][-1] > 0.01 and state[1][-1] > 0.01:
+                dstate1 = df_liquid(*[v[-1] for v in state])
             else:
-                break
-                raise NotImplementedError()
+                raise Exception("dujj")
+            dstate1 = np.array(dstate1)
+
+            # order 2 adams-bashforth integration (higher accuracy than
+            # something like explicit euler (plus i make a point not to
+            # use explicit euler (its just not it))). This is why we
+            # track the previous dstate.
+            if dstate0 is None:
+                dstate0 = dstate1
+            Dstate = Dt * (1.5 * dstate1 - 0.5 * dstate0)
+            for Dv, v in zip(Dstate, state):
+                v.append(v[-1] + Dv)
+                if v[-1] < 0.0:
+                    v[-1] = 0.0
+
+            dstate0 = dstate1
+
     except Exception:
         traceback.print_exc()
 
-    s.burn_time = (len(P_u) - 1) * dt
-    t = np.linspace(0, s.burn_time, len(P_u))
+    m_l_u, m_v_u, T_u, P_d = state
+    P_u = [PropsSI("P", "T", T, "Q", 0, "N2O") if not np.isnan(T) else 0.0 for T in T_u]
+
+    s.burn_time = (len(m_l_u) - 1) * Dt
+    t = np.linspace(0, s.burn_time, len(m_l_u))
     mask = np.ones(len(t), dtype=bool)
     # mask = (np.arange(len(t)) >= int(0.85 * len(t)))
 
     s.tank_pressure = np.array(P_u)
     s.cc_pressure = np.array(P_d)
     s.tank_temperature = np.array(T_u)
-    s.cc_temperature = np.array(T_d)
     s.ox_mass_liquid = np.array(m_l_u)
     s.ox_mass_vapour = np.array(m_v_u)
     s.ox_mass = s.ox_mass_liquid + s.ox_mass_vapour
-    s.injector_mass_flow_rate = np.array(mdot_inj)
+    if len(s.ox_mass) == 1:
+        dminj = np.array([0.0])
+    else:
+        dminj = np.diff(s.ox_mass)
+        dminj = np.append(dminj, dminj[-1])
+    s.injector_mass_flow_rate = -dminj / Dt
 
     plotme = [
         (s.tank_pressure, "Tank pressure", "Pressure [Pa]"),
         (s.cc_pressure, "CC pressure", "Pressure [Pa]"),
         (s.tank_temperature, "Tank temperature", "Temperature [K]"),
-        (s.cc_temperature, "CC temperature", "Temperature [K]"),
+        (s.injector_mass_flow_rate, "Injector mass flow rate", "Mass flow rate [kg/s]"),
         (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]"),
         (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]"),
         (s.ox_mass_vapour/s.ox_mass, "Tank quality", "Mass [kg]"),
-        (s.injector_mass_flow_rate, "Injector mass flow rate", "Mass flow rate [kg/s]"),
-        # (mdot_SPI_s, "SPI", "Mass flow rate [kg/s]"),
-        # (mdot_HEM_s, "HEM", "Mass flow rate [kg/s]"),
         (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]"),
-        # (s.ox_mass_liquid + s.ox_mass_vapour + np.array(m_d), "Total mass", "Mass [kg]"),
-        (V_u_s, "Tank volume (should be const but yk)", "Volume [m^3]"),
     ]
-    ynum = 2
-    xnum = (len(plotme) + 1) // 2
-    for i, elem in enumerate(plotme):
-        if elem is ...:
-            continue
-        y, title, ylabel = elem
-        plt.subplot(ynum, xnum, 1 + i // ynum + xnum * (i % ynum))
-        if not isinstance(y, np.ndarray):
-            y = np.array(y)
-        if len(y) == 1:
-            if len(y) == len(t) - 1:
-                plt.plot(t[:-1], y, "o")
-            else:
-                plt.plot(t, y, "o")
-        elif len(y) > 0:
-            if len(y) == len(t) - 1:
-                plt.plot(t[mask][:-1], y[mask[:-1]])
-            else:
-                plt.plot(t[mask], y[mask])
-        plt.title(title)
-        plt.xlabel("Time [s]")
-        plt.ylabel(ylabel)
-        plt.grid()
-    plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)
+    def doplot(plotme):
+        plt.figure()
+        ynum = 2
+        xnum = (len(plotme) + 1) // 2
+        for i, elem in enumerate(plotme):
+            if elem is ...:
+                continue
+            y, title, ylabel = elem
+            plt.subplot(ynum, xnum, 1 + i // ynum + xnum * (i % ynum))
+            if not isinstance(y, np.ndarray):
+                y = np.array(y)
+            if len(y) == 1:
+                if len(y) == len(t) - 1:
+                    plt.plot(t[:-1], y, "o")
+                else:
+                    plt.plot(t, y, "o")
+            elif len(y) > 0:
+                if len(y) == len(t) - 1:
+                    plt.plot(t[mask][:-1], y[mask[:-1]])
+                else:
+                    plt.plot(t[mask], y[mask])
+            plt.title(title)
+            plt.xlabel("Time [s]")
+            plt.ylabel(ylabel)
+            plt.grid()
+        plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)
+    doplot(plotme)
+    doplot([(v[0], k, v[1]) for k, v in debugme.state.items()])
     plt.show()
+
+    return new_top
 
 
 
@@ -639,23 +653,7 @@ def cost(s):
     s.locked_com = top + s.locked_local_com
     top += s.locked_length
 
-    tank_wall_cyl = Cylinder.pipe(s.tank_length, outer_diameter=s.rocket_diameter)
-    # Interdependance on thickness to determine pressure but need pressure to determine
-    # thickness, obviously possible to solve simultaneous but here we just assume a small
-    # thickness to find pressure then find required thickness for this pressure.
-    tank_wall_cyl.thickness = 3e-3 # [m]
-
-    tank_cyl = Cylinder.solid(s.tank_length, tank_wall_cyl.inner_diameter)
-
-    simulate_burn(s, tank_cyl)
-
-    # Recalculate actual wall thickness for the tank pressure.
-    tank_wall_cyl.inner_diameter = None
-    tank_wall_cyl.set_thickness_for_stress(max(s.tank_pressure), s.tank_wall_yield_strength)
-    s.tank_com = tank_wall_cyl.com(top)
-    s.tank_wall_thickness = tank_wall_cyl.thickness
-    s.tank_wall_mass = tank_wall_cyl.mass(s.tank_wall_density)
-    top += s.tank_length
+    top += simulate_burn(s, top) # does burn and tank properties.
 
     s.mov_com = top + s.mov_local_com
     top += s.mov_length
@@ -722,9 +720,10 @@ sys.locked_mass = 5.0 # [kg]
 sys.locked_length = 2.0 # [m]
 sys.locked_local_com = 1.3 # downwards from top, [m]
 
-sys.tank_length = 0.3 # [m] OUTPUT
-sys.tank_wall_density = 2700.0 # Al 6061-O, [kg/m^3]
-sys.tank_wall_yield_strength = 55e6 # Al 6061-O, [Pa]
+sys.tank_length = 0.55 # [m] OUTPUT
+sys.tank_wall_density = 2720.0 # Al6061, [kg/m^3]
+sys.tank_wall_yield_strength = 241e6 # Al6061, [Pa]
+sys.tank_wall_specific_heat_capacity = 896 # Al6061, [J/kg/K]
 
 sys.ox_type = "N2O" # required
 sys.ox_volume_fill_frac = 0.8 # [-]
@@ -737,26 +736,25 @@ sys.injector_mass = 0.5 # [kg]
 sys.injector_length = 0.02 # [m]
 sys.injector_local_com = sys.injector_length / 2 # [m]
 sys.injector_discharge_coeff = 0.67 # [-]
-sys.injector_orifice_area = 20 * np.pi/4 * 0.5e-3**2 # [m^2], OUTPUT
+sys.injector_orifice_area = 40 * np.pi/4 * 0.5e-3**2 # [m^2], OUTPUT
 sys.injector_initial_pressure_ratio = 0.5 # [-], INPUT
 
 sys.cc_diameter = 0.060 # [m], OUTPUT
-sys.cc_wall_density = 2700.0 # Al 6061-O, [kg/m^3]
-sys.cc_wall_yield_strength = 55e6 # Al 6061-O, [Pa]
+sys.cc_wall_density = 2720.0 # Al6061, [kg/m^3]
+sys.cc_wall_yield_strength = 241e6 # Al6061, [Pa]
 
 sys.fuel_type = "paraffin" # required.
-sys.fuel_length = 0.125 # [m], OUTPUT
+sys.fuel_length = 0.2 # [m], OUTPUT
 sys.fuel_thickness = 0.017 # [m], OUTPUT
 
 sys.nozzle_exit_area = 0.01 # [m^2], OUTPUT
 sys.nozzle_thrust_efficiency = 0.9 # [-]
 
 sys.rocket_target_apogee = 30000 / 3.281 # [m]
-sys.rocket_diameter = 0.25 # [m]
+sys.rocket_diameter = 0.145 # [m]
 sys.rocket_stability = 1.5 # [-?]
 
 sys.environment_temperature = 20 + 273.15 # [K]
 sys.integration_dt = 0.02 # [-]
-
 
 cost(sys)
