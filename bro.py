@@ -339,6 +339,7 @@ def simulate_burn(s, top):
     # DX = discrete change
 
     Dt = s.integration_dt
+    DT = Dt * 1.0 # use for numerical derivatives over temperature.
     Cd = s.injector_discharge_coeff
     Ainj = s.injector_orifice_area
     T0_u = s.environment_temperature
@@ -380,18 +381,16 @@ def simulate_burn(s, top):
                 "V_l_u": ([], "Volume [m^3]"),
                 "V_v_u": ([], "Volume [m^3]"),
                 "propV_u": ([], "Volume [m^3]"),
+                "propP_u": ([], "Pressure [Pa]"),
             }
         def __setitem__(self, name, value):
             self.state[name][0].append(value)
 
-    def df_liquid(m_l_u, m_v_u, T_u, P_d):
+    def df_liquid(m_l_u, m_v_u, T_u, P_u, P_d):
         """
         ONLY VALID WHEN LIQUID DRAINING.
         Returns the time derivatives of all input variables.
         """
-
-        # Tank is saturated.
-        P_u = PropsSI("P", "T", T_u, "Q", 0, "N2O")
 
         # Single-phase incompressible model (with Beta = 0):
         # (assuming tank liquid density as the "incompressible" density)
@@ -400,22 +399,24 @@ def simulate_burn(s, top):
 
         # Homogenous equilibrium model:
         x_u = m_v_u / (m_l_u + m_v_u)
-        s_u = PropsSI("S", "P", P_u, "Q", x_u, s.ox_type)
+        s_u = PropsSI("S", "P", P_u, "Q", x_u, "N2O")
         s_l_d = PropsSI("S", "P", P_d, "Q", 0, "N2O")
         s_v_d = PropsSI("S", "P", P_d, "Q", 1, "N2O")
         x_d = (s_u - s_l_d) / (s_v_d - s_l_d)
         h_u = PropsSI("H", "P", P_u, "Q", x_u, "N2O")
         h_d = PropsSI("H", "P", P_d, "Q", x_d, "N2O")
-        if h_u < h_d: # its been known to happen.
-            h_u = h_d # mdot_HEM -> 0 as m_l_u -> 0, but consistently breaks earlier.
         rho_d = PropsSI("D", "P", P_d, "Q", x_d, "N2O")
         mdot_HEM = Cd * Ainj * rho_d * np.sqrt(2 * (h_u - h_d))
 
         # Generalised non-homogenous non-equilibrium model:
         # (assuming that P_sat is upstream saturation, and so is alaways
-        #  =P_u since its saturated??????)
-        # P_sat = PropsSI("P", "T", T_d[-1], "Q", 1, "N2O")
-        # kappa = np.sqrt((P_u - P_d) / (P_sat - P_d))
+        #  =P_u since its saturated?????? this means that the dyer model
+        #  is always just an arithmetic mean of spi and hem when the tank
+        #  is saturated but hey maybe thats what we're looking for).
+        #
+        #  kappa = sqrt((P_u - P_d) / (P_sat - P_d))
+        #  kappa = sqrt((P_u - P_d) / (P_u - P_d))
+        #  kappa = sqrt(1) = 1
         kappa = 1
         k_NHNE = 1 / (1 + kappa)
         dminj = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE
@@ -474,14 +475,12 @@ def simulate_burn(s, top):
         # so:
         #  dT = dEvap / Cp
         #  dT = (dm_v * hgf + m_v * dT * dhgfdT) / Cp
-        # Oh hey its just simultaneous equations. substitution.
         #  Cp * dT = hgf * dm_v + m_v * dT * dhgfdT
+        # Oh hey its just simultaneous equations. substitution.
         #  Cp * dT = hgf * (foo + dT * bar) + m_v * dT * dhgfdT
         #  dT * (Cp - hgf * bar - m_v * dhgfdT) = hgf * foo
         # => dT = hgf * foo / (Cp - hgf * bar - m_v * dhgfdT)
         # insane.
-
-        DT = 0.01 # use for numerical derivatives over temp.
 
         rho_l_u = PropsSI("D", "T", T_u, "Q", 0, "N2O")
         rho_v_u = PropsSI("D", "T", T_u, "Q", 1, "N2O")
@@ -508,6 +507,17 @@ def simulate_burn(s, top):
         dm_l_u = -dminj - dm_v_u
 
 
+        # Tank is saturated and remains saturated.
+        #  P = Psat  [which is a function of T]
+        #  d/dt (P) = d/dt (Psat)
+        #  d/dt (P) = d/dT (Psat) * dT/dt  [chain rule]
+        # note we don't use P_u when determining d/dT (Psat) since that
+        # will lead to runaway error when P_u (inevitably) deviates
+        # slightly from the genuine saturation pressure.
+        dPdT_u = (PropsSI("P", "T", T_u + DT, "Q", 0, "N2O")
+                - PropsSI("P", "T", T_u, "Q", 0, "N2O")) / DT
+        dP_u = dPdT_u * dT_u
+
 
         # TODO: sim cc
         dT_d = 0.0
@@ -521,15 +531,26 @@ def simulate_burn(s, top):
         debugme["V_l_u"] = V_l_u
         debugme["V_v_u"] = V_v_u
         debugme["propV_u"] = (V_l_u + V_v_u) / V_u
+        debugme["propP_u"] = P_u / PropsSI("P", "T", T_u, "Q", 0, "N2O")
 
 
-        return dm_l_u, dm_v_u, dT_u, dT_d, dP_d
+        return dm_l_u, dm_v_u, dT_u, dP_u, dP_d
+
+
+    def df_vapour(m_l_u, m_v_u, T_u, P_u, P_d):
+        """
+        ONLY VALID WHEN VAPOUR DRAINING.
+        Returns the time derivatives of all input variables.
+        """
+        dm_l_u = dm_v_u = dT_u = dP_u = dP_d = -10.0
+        return dm_l_u, dm_v_u, dT_u, dP_u, dP_d
 
     try:
         state = [
             [m0_l_u],
             [m0_v_u],
             [T0_u],
+            [P0_u],
             [s.injector_initial_pressure_ratio * P0_u],
         ]
         dstate0 = None
@@ -538,11 +559,14 @@ def simulate_burn(s, top):
             current_time += Dt
 
             # If liquid in that thang.
-            if state[0][-1] > 0.01 and state[1][-1] > 0.01:
+            if state[0][-1] > 0.01:
                 dstate1 = df_liquid(*[v[-1] for v in state])
+            # elif state[1][-1] > 0.01:
+            #     dstate1 = df_vapour(*[v[-1] for v in state])
             else:
                 raise Exception("dujj")
             dstate1 = np.array(dstate1)
+            assert len(dstate1) == len(state)
 
             # order 2 adams-bashforth integration (higher accuracy than
             # something like explicit euler (plus i make a point not to
@@ -561,8 +585,7 @@ def simulate_burn(s, top):
     except Exception:
         traceback.print_exc()
 
-    m_l_u, m_v_u, T_u, P_d = state
-    P_u = [PropsSI("P", "T", T, "Q", 0, "N2O") if not np.isnan(T) else 0.0 for T in T_u]
+    m_l_u, m_v_u, T_u, P_u, P_d = state
 
     s.burn_time = (len(m_l_u) - 1) * Dt
     t = np.linspace(0, s.burn_time, len(m_l_u))
