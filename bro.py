@@ -338,6 +338,7 @@ def simulate_burn(s, top):
     # X_v = vapour
     # X_u = upstream (tank)
     # X_d = downstream (cc)
+    # X_w = tank wall (considered heat sink)
     # dX = time derivative
     # DX = discrete change
 
@@ -372,8 +373,8 @@ def simulate_burn(s, top):
     m0_l_u = V0_l_u * PropsSI("D", "T", T0_u, "Q", 0, s.ox_type)
     m0_v_u = V0_v_u * PropsSI("D", "T", T0_u, "Q", 1, s.ox_type)
     x0_u = m0_v_u / (m0_l_u + m0_v_u)
-    # Heat capacity of tank walls.
-    Cpwall = s.tank_wall_specific_heat_capacity * s.tank_wall_mass
+    # Heat capacity of tank walls (note Cp ~= Cv for solids).
+    Cwall = s.tank_wall_specific_heat_capacity * s.tank_wall_mass
 
     # Justa coupel more sys properties.
     s.tank_volume = V_u
@@ -467,7 +468,43 @@ def simulate_burn(s, top):
             #   bar = (m_l * drhodT_l / rho_l**2
             #        + m_v * drhodT_v / rho_v**2) / (1/rho_v - 1/rho_l)
             #  dm_v = foo + dT * bar
-            # So, dm_v depends on dT but dT also depends on dm_v:
+            # So, dm_v depends on dT, but also vice versa:
+            #  d/dt (U) = -dminj * h_l  [first law of thermodynamics, adiabatic]
+            #  d/dt (U_w + U_l + U_v) = -dminj * h_l
+            #  d/dt (m_w*u_w) + d/dt (m_l*u_l) + d/dt (m_v*u_v) = -dminj * h_l
+            #  -dminj * h_l = dm_w*u_w + m_w*du_w
+            #               + dm_l*u_l + m_l*du_l
+            #               + dm_v*u_v + m_v*du_v
+            # dm_w = 0  [wall aint going anywhere]
+            # dm_l = -dm_v - dminj  [same as earlier]
+            #  -dminj * h_l = m_w*du_w + m_l*du_l + m_v*du_v
+            #               + (-dm_v - dminj) * u_l
+            #               + dm_v*u_v
+            #  dminj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
+            #                      - dm_v*u_l
+            #                      + dm_v*u_v
+            #  dminj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
+            #                      + dm_v * (u_v - u_l)
+            # du = d/dt (u) = d/dT (u) * dT/dt
+            # also note:
+            #   u = int (cv) dT
+            #   d/dT (u) = cv
+            # therefore:
+            #   du = dT * cv
+            #  dminj * (u_l - h_l) = dT * (m_w*cv_w + m_l*cv_l + m_v*cv_v)
+            #                      + dm_v * (u_v - u_l)
+            # let: Cv = m_w*cv_w + m_l*cv_l + m_v*cv_v
+            #  dminj * (u_l - h_l) = dT * Cv + dm_v * (u_v - u_l)
+            #  dT * Cv = dminj * (u_l - h_l) + dm_v * (u_l - u_v)
+            # bitta simul lets substitute
+            #  dT * Cv = dminj * (u_l - h_l) + (foo + dT * bar) * (u_l - u_v)
+            #  dT * Cv - dT * bar * (u_l - u_v) = dminj * (u_l - h_l) + foo * (u_l - u_v)
+            #  dT = (dminj * (u_l - h_l) + foo * (u_l - u_v))
+            #     / (Cv - bar * (u_l - u_v))
+            # dandy.
+
+            # OLD (but maybe right idk):
+            # So, dm_v depends on dT, but also vice versa:
             #  dT = dE / Cp  [open system energy change]
             #  dT = dEvap / Cp  [assuming adiabatic]
             #  dT = (hf - hg) * dm_v / Cp  [wrong, see "OH BLOODY HELL"]
@@ -489,29 +526,53 @@ def simulate_burn(s, top):
             # => dT = hgf * foo / (Cp - hgf * bar - m_v * dhgfdT)
             # insane.
 
-            rho_l_u = PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
-            rho_v_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
-            drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, s.ox_type) - rho_l_u) / DT
-            drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, s.ox_type) - rho_v_u) / DT
+            if True:
+                rho_l_u = PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
+                rho_v_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
+                drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, s.ox_type) - rho_l_u) / DT
+                drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, s.ox_type) - rho_v_u) / DT
 
-            Cp_l_u = m_l_u * PropsSI("C", "T", T_u, "Q", 0, s.ox_type)
-            Cp_v_u = m_v_u * PropsSI("C", "T", T_u, "Q", 1, s.ox_type)
-            Cp_u = Cp_l_u + Cp_v_u + Cpwall # including wall heat mass.
+                Cp_l_u = m_l_u * PropsSI("C", "T", T_u, "Q", 0, s.ox_type)
+                Cp_v_u = m_v_u * PropsSI("C", "T", T_u, "Q", 1, s.ox_type)
+                Cp_u = Cp_l_u + Cp_v_u + Cwall # including wall heat mass.
 
-            hgf_u = (PropsSI("H", "T", T_u, "Q", 0, s.ox_type)
-                - PropsSI("H", "T", T_u, "Q", 1, s.ox_type))
-            dhgfdT_u = (PropsSI("H", "T", T_u + DT, "Q", 0, s.ox_type)
-                    - PropsSI("H", "T", T_u + DT, "Q", 1, s.ox_type)
-                    - hgf_u) / DT
+                hgf_u = (PropsSI("H", "T", T_u, "Q", 0, s.ox_type)
+                    - PropsSI("H", "T", T_u, "Q", 1, s.ox_type))
+                dhgfdT_u = (PropsSI("H", "T", T_u + DT, "Q", 0, s.ox_type)
+                        - PropsSI("H", "T", T_u + DT, "Q", 1, s.ox_type)
+                        - hgf_u) / DT
 
-            foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
-            bar = (m_l_u * drhodT_l_u / rho_l_u**2
-                + m_v_u * drhodT_v_u / rho_v_u**2) / (1/rho_v_u - 1/rho_l_u)
+                foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
+                bar = (m_l_u * drhodT_l_u / rho_l_u**2
+                    + m_v_u * drhodT_v_u / rho_v_u**2) / (1/rho_v_u - 1/rho_l_u)
 
-            dT_u = hgf_u * foo / (Cp_u - hgf_u * bar - m_v_u * dhgfdT_u)
+                dT_u = hgf_u * foo / (Cp_u - hgf_u * bar - m_v_u * dhgfdT_u)
 
-            dm_v_u = foo + dT_u * bar
-            dm_l_u = -dminj - dm_v_u
+                dm_v_u = foo + dT_u * bar
+                dm_l_u = -dminj - dm_v_u
+            else:
+                rho_l_u = PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
+                rho_v_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
+                drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, s.ox_type) - rho_l_u) / DT
+                drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, s.ox_type) - rho_v_u) / DT
+
+                Cv_l_u = m_l_u * PropsSI("O", "T", T_u, "Q", 0, s.ox_type)
+                Cv_v_u = m_v_u * PropsSI("O", "T", T_u, "Q", 1, s.ox_type)
+                Cv_u = Cv_l_u + Cv_v_u + Cwall # including wall heat mass.
+
+                u_l_u = PropsSI("U", "T", T_u, "Q", 0, s.ox_type)
+                u_v_u = PropsSI("U", "T", T_u, "Q", 1, s.ox_type)
+                h_l_u = PropsSI("H", "T", T_u, "Q", 0, s.ox_type)
+
+                foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
+                bar = (m_l_u * drhodT_l_u / rho_l_u**2
+                    + m_v_u * drhodT_v_u / rho_v_u**2) / (1/rho_v_u - 1/rho_l_u)
+
+                dT_u = (dminj * (u_l_u - h_l_u) + foo * (u_l_u - u_v_u)) \
+                     / (Cv_u - bar * (u_l_u - u_v_u))
+
+                dm_v_u = foo + dT_u * bar
+                dm_l_u = -dminj - dm_v_u
 
 
             # Tank is saturated and remains saturated.
@@ -544,6 +605,7 @@ def simulate_burn(s, top):
 
             gamma_u = (PropsSI("C", "P", P_u, "T", T_u, s.ox_type)
                      / PropsSI("O", "P", P_u, "T", T_u, s.ox_type))
+            Z_u = PropsSI("Z", "P", P_u, "T", T_u, s.ox_type)
 
             foo = 2 / (gamma_u + 1)
             critical_pressure_ratio = foo ** (gamma_u / (gamma_u + 1))
@@ -552,16 +614,18 @@ def simulate_burn(s, top):
             # Choked flow when inverse pressure ratio is less than critical.
             if inverse_pressure_ratio <= critical_pressure_ratio:
                 rootme = critical_pressure_ratio * foo # dujj.
-                rootme *= gamma_u / R_u / T_u
+                rootme *= gamma_u / Z_u / R_u / T_u
                 dminj = Cd * Ainj * P_u * np.sqrt(rootme)
                 print("choked")
             # Otherwise un-choked flow.
             else:
                 rootme = inverse_pressure_ratio ** (2 / gamma_u)
                 rootme -= inverse_pressure_ratio ** ((gamma_u + 1) / gamma_u)
-                rootme *= 2 * gamma_u / R_u / T_u / (gamma_u - 1)
+                rootme *= 2 * gamma_u / Z_u / R_u / T_u / (gamma_u - 1)
                 dminj = Cd * Ainj * P_u * np.sqrt(rootme)
                 print("unchoked")
+
+
 
             dm_v_u = -dminj
 
