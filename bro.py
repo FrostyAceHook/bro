@@ -349,7 +349,7 @@ def simulate_burn(s):
     negligible_mass = 0.005 # [kg]
     Cd = s.injector_discharge_coeff # [-]
     Ainj = s.injector_orifice_area # [m^2]
-    R_u = PropsSI("GAS_CONSTANT", s.ox_type) / PropsSI("M", s.ox_type) # [J/kg/K]
+    Rspecific_u = PropsSI("GAS_CONSTANT", s.ox_type) / PropsSI("M", s.ox_type) # [J/kg/K]
     Pr_cutoff = s.injector_pressure_ratio_cutoff # [-]
 
     # Heat capacity of tank walls (note Cp ~= Cv for solids).
@@ -575,28 +575,22 @@ def simulate_burn(s):
             if P_u / P_d <= Pr_cutoff:
                 raise Exception("injector pressure ratio too small")
 
-            gamma_u = (PropsSI("C", "T", T_u, "D", rho_u, s.ox_type)
-                     / PropsSI("O", "T", T_u, "D", rho_u, s.ox_type))
+            # Technically gamma but use 'y' for file size reduction.
+            y_u = PropsSI("C", "T", T_u, "D", rho_u, s.ox_type) \
+                / PropsSI("O", "T", T_u, "D", rho_u, s.ox_type)
+            # Use compressibility factor to account for non-ideal gas.
             Z_u = PropsSI("Z", "T", T_u, "D", rho_u, s.ox_type)
 
-            foo = 2 / (gamma_u + 1)
-            critical_pressure_ratio = foo ** (gamma_u / (gamma_u + 1))
-            inverse_pressure_ratio = P_d / P_u
-
-            # Choked flow when inverse pressure ratio is less than critical.
-            if inverse_pressure_ratio <= critical_pressure_ratio:
-                rootme = critical_pressure_ratio * foo # dujj.
-                rootme *= gamma_u / Z_u / R_u / T_u
-                dminj = Cd * Ainj * P_u * np.sqrt(rootme)
-            # Otherwise un-choked flow.
-            else:
-                rootme = inverse_pressure_ratio ** (2 / gamma_u)
-                rootme -= inverse_pressure_ratio ** ((gamma_u + 1) / gamma_u)
-                rootme *= 2 * gamma_u / Z_u / R_u / T_u / (gamma_u - 1)
-                dminj = Cd * Ainj * P_u * np.sqrt(rootme)
-            # Note that the flow rate is discontinuous as it changes from choked
-            # to unchoked, but i think this is the reality and not a simulation
-            # error/quirk.
+            # General compressible flow through an injector, with both
+            # choked and unchoked possibilities:
+            Pr_crit = (2 / (y_u + 1)) ** (y_u / (y_u - 1))
+            Pr_rec = P_d / P_u
+            if Pr_rec <= Pr_crit: # choked.
+                Pterm = (2 / (y_u + 1)) ** ((y_u + 1) / (y_u - 1))
+            else: # unchoked.
+                Pterm = Pr_rec ** (2 / y_u) - Pr_rec ** ((y_u + 1) / y_u)
+                Pterm *= 2 / (y_u - 1)
+            dminj = Cd * Ainj * P_u * np.sqrt(y_u / Z_u / Rspecific_u / T_u * Pterm)
 
             # Mass only leaves through injector, and no state change.
             dm_v_u = -dminj
