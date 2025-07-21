@@ -15,8 +15,7 @@ def singleton(cls):
     """
     instance = cls()
     def throw(cls, *args, **kwargs):
-        raise TypeError("cannot create another instance of singleton "
-                f"{repr(cls.__name__)}")
+        raise TypeError(f"cannot create another instance of singleton {repr(cls.__name__)}")
     if getattr(instance, "__doc__", None) is None:
         if getattr(cls, "__doc__", None) is not None:
             instance.__doc__ = cls.__doc__
@@ -343,17 +342,18 @@ def simulate_burn(s, top):
     # DX = discrete change
 
     Dt = s.integration_dt
-    DT = Dt * 1.0 # use for numerical derivatives over temperature.
+    DT = Dt * 2.0 # use for numerical derivatives over temperature.
     negligible_mass = 0.001
     Cd = s.injector_discharge_coeff
     Ainj = s.injector_orifice_area
     T0_u = s.environment_temperature
     P0_u = PropsSI("P", "T", T0_u, "Q", 0, s.ox_type)
     R_u = PropsSI("GAS_CONSTANT", s.ox_type) / PropsSI("M", s.ox_type)
+    pressure_ratio_cutoff = 1.0 # upstream / downstream
 
 
-
-    # Now that we have pressure, we can establish the tank walls.
+    # Now that we have max pressure (which happens immediately), we can
+    # establish the tank walls.
     tank_wall_cyl = Cylinder.pipe(s.tank_length, outer_diameter=s.rocket_diameter)
     tank_wall_cyl.set_thickness_for_stress(P0_u, s.tank_wall_yield_strength)
     tank_wall_end_cyl = Cylinder.solid(tank_wall_cyl.thickness,
@@ -381,6 +381,10 @@ def simulate_burn(s, top):
     s.ox_initial_mass = m0_l_u + m0_v_u
 
 
+    # TODO: initial cc pressure?
+    P0_d = s.injector_initial_pressure_ratio * P0_u
+
+
     @singleton
     class debugme:
         def __init__(self):
@@ -388,30 +392,48 @@ def simulate_burn(s, top):
                 "V_l_u": ([], "Volume [m^3]"),
                 "V_v_u": ([], "Volume [m^3]"),
                 "propV_u": ([], "Volume [m^3]"),
-                "propP_u": ([], "Pressure [Pa]"),
             }
         def __setitem__(self, name, value):
             self.state[name][0].append(value)
+    plot_debugme = False
 
-    def df(m_l_u, m_v_u, T_u, P_u, P_d):
+
+    # Only state tracked is:
+    # - liquid mass (happens to always be saturated)
+    # - vapour mass (only saturated if liquid mass > negligible)
+    # - tank temperature
+    # - cc pressure
+    # This is enough to fully define the system at all times (when
+    # combined with the constant tank volume).
+
+    def df(m_l_u, m_v_u, T_u, P_d):
         """
         Returns the time derivatives of all input variables.
         """
 
         # Saturated liquid draining while there's any liquid in the tank.
         if m_l_u > negligible_mass:
+            # Saturated pressure.
+            P_u = PropsSI("P", "T", T_u, "Q", 0, s.ox_type)
+
+
+            # Find injector flow rate.
+
+            if P_u / P_d <= pressure_ratio_cutoff:
+                raise Exception("injector pressure ratio too small")
+
             # Single-phase incompressible model (with Beta = 0):
-            # (assuming tank liquid density as the "incompressible" density)
+            # (assuming upstream saturated liquid density as the "incompressible" density)
             rho_l_u = PropsSI("D", "P", P_u, "Q", 0, s.ox_type)
             mdot_SPI = Cd * Ainj * np.sqrt(2 * rho_l_u * (P_u - P_d))
 
             # Homogenous equilibrium model:
-            x_u = m_v_u / (m_l_u + m_v_u)
-            s_u = PropsSI("S", "P", P_u, "Q", x_u, s.ox_type)
+            # (assuming only saturated liquid leaving from upstream)
+            s_u = PropsSI("S", "P", P_u, "Q", 0, s.ox_type)
             s_l_d = PropsSI("S", "P", P_d, "Q", 0, s.ox_type)
             s_v_d = PropsSI("S", "P", P_d, "Q", 1, s.ox_type)
             x_d = (s_u - s_l_d) / (s_v_d - s_l_d)
-            h_u = PropsSI("H", "P", P_u, "Q", x_u, s.ox_type)
+            h_u = PropsSI("H", "P", P_u, "Q", 0, s.ox_type)
             h_d = PropsSI("H", "P", P_d, "Q", x_d, s.ox_type)
             rho_d = PropsSI("D", "P", P_d, "Q", x_d, s.ox_type)
             mdot_HEM = Cd * Ainj * rho_d * np.sqrt(2 * (h_u - h_d))
@@ -496,95 +518,39 @@ def simulate_burn(s, top):
             # let: Cv = m_w*cv_w + m_l*cv_l + m_v*cv_v
             #  dminj * (u_l - h_l) = dT * Cv + dm_v * (u_v - u_l)
             #  dT * Cv = dminj * (u_l - h_l) + dm_v * (u_l - u_v)
-            # bitta simul lets substitute
+            # i think conceptually this makes sense as:
+            #  internal energy change = boundary work + phase change energy
+            # which checks out, so: bitta simul lets substitute
             #  dT * Cv = dminj * (u_l - h_l) + (foo + dT * bar) * (u_l - u_v)
             #  dT * Cv - dT * bar * (u_l - u_v) = dminj * (u_l - h_l) + foo * (u_l - u_v)
             #  dT = (dminj * (u_l - h_l) + foo * (u_l - u_v))
             #     / (Cv - bar * (u_l - u_v))
             # dandy.
 
-            # OLD (but maybe right idk):
-            # So, dm_v depends on dT, but also vice versa:
-            #  dT = dE / Cp  [open system energy change]
-            #  dT = dEvap / Cp  [assuming adiabatic]
-            #  dT = (hf - hg) * dm_v / Cp  [wrong, see "OH BLOODY HELL"]
-            # let: hgf = hf - hg
-            # OH BLOODY HELL hgf is also a function of time
-            # lets take a step back.
-            #  Evap = m_v * hgf
-            #  dEvap = d/dt (m_v * hgf)
-            #  dEvap = hgf * dm_v + m_v * d/dt (hgf)
-            # d/dt (hgf) = d/dT (hgf) * dT/dt  [chain rule]
-            # dhgfdT = d/dT (hgf)
-            # so:
-            #  dT = dEvap / Cp
-            #  dT = (dm_v * hgf + m_v * dT * dhgfdT) / Cp
-            #  Cp * dT = hgf * dm_v + m_v * dT * dhgfdT
-            # Oh hey its just simultaneous equations. substitution.
-            #  Cp * dT = hgf * (foo + dT * bar) + m_v * dT * dhgfdT
-            #  dT * (Cp - hgf * bar - m_v * dhgfdT) = hgf * foo
-            # => dT = hgf * foo / (Cp - hgf * bar - m_v * dhgfdT)
-            # insane.
+            rho_l_u = PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
+            rho_v_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
+            drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, s.ox_type) - rho_l_u) / DT
+            drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, s.ox_type) - rho_v_u) / DT
 
-            if True:
-                rho_l_u = PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
-                rho_v_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
-                drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, s.ox_type) - rho_l_u) / DT
-                drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, s.ox_type) - rho_v_u) / DT
+            Cv_l_u = m_l_u * PropsSI("O", "T", T_u, "Q", 0, s.ox_type)
+            Cv_v_u = m_v_u * PropsSI("O", "T", T_u, "Q", 1, s.ox_type)
+            Cv_u = Cv_l_u + Cv_v_u + Cwall
 
-                Cp_l_u = m_l_u * PropsSI("C", "T", T_u, "Q", 0, s.ox_type)
-                Cp_v_u = m_v_u * PropsSI("C", "T", T_u, "Q", 1, s.ox_type)
-                Cp_u = Cp_l_u + Cp_v_u + Cwall # including wall heat mass.
+            u_l_u = PropsSI("U", "T", T_u, "Q", 0, s.ox_type)
+            u_v_u = PropsSI("U", "T", T_u, "Q", 1, s.ox_type)
+            h_l_u = PropsSI("H", "T", T_u, "Q", 0, s.ox_type)
 
-                hgf_u = (PropsSI("H", "T", T_u, "Q", 0, s.ox_type)
-                    - PropsSI("H", "T", T_u, "Q", 1, s.ox_type))
-                dhgfdT_u = (PropsSI("H", "T", T_u + DT, "Q", 0, s.ox_type)
-                        - PropsSI("H", "T", T_u + DT, "Q", 1, s.ox_type)
-                        - hgf_u) / DT
+            foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
+            bar = (m_l_u * drhodT_l_u / rho_l_u**2
+                 + m_v_u * drhodT_v_u / rho_v_u**2) \
+                / (1/rho_v_u - 1/rho_l_u)
 
-                foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
-                bar = (m_l_u * drhodT_l_u / rho_l_u**2
-                    + m_v_u * drhodT_v_u / rho_v_u**2) / (1/rho_v_u - 1/rho_l_u)
+            dT_u = (dminj * (u_l_u - h_l_u) + foo * (u_l_u - u_v_u)) \
+                 / (Cv_u - bar * (u_l_u - u_v_u))
 
-                dT_u = hgf_u * foo / (Cp_u - hgf_u * bar - m_v_u * dhgfdT_u)
+            dm_v_u = foo + dT_u * bar
+            dm_l_u = -dminj - dm_v_u
 
-                dm_v_u = foo + dT_u * bar
-                dm_l_u = -dminj - dm_v_u
-            else:
-                rho_l_u = PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
-                rho_v_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
-                drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, s.ox_type) - rho_l_u) / DT
-                drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, s.ox_type) - rho_v_u) / DT
-
-                Cv_l_u = m_l_u * PropsSI("O", "T", T_u, "Q", 0, s.ox_type)
-                Cv_v_u = m_v_u * PropsSI("O", "T", T_u, "Q", 1, s.ox_type)
-                Cv_u = Cv_l_u + Cv_v_u + Cwall # including wall heat mass.
-
-                u_l_u = PropsSI("U", "T", T_u, "Q", 0, s.ox_type)
-                u_v_u = PropsSI("U", "T", T_u, "Q", 1, s.ox_type)
-                h_l_u = PropsSI("H", "T", T_u, "Q", 0, s.ox_type)
-
-                foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
-                bar = (m_l_u * drhodT_l_u / rho_l_u**2
-                    + m_v_u * drhodT_v_u / rho_v_u**2) / (1/rho_v_u - 1/rho_l_u)
-
-                dT_u = (dminj * (u_l_u - h_l_u) + foo * (u_l_u - u_v_u)) \
-                     / (Cv_u - bar * (u_l_u - u_v_u))
-
-                dm_v_u = foo + dT_u * bar
-                dm_l_u = -dminj - dm_v_u
-
-
-            # Tank is saturated and remains saturated.
-            #  P = Psat  [which is a function of T]
-            #  d/dt (P) = d/dt (Psat)
-            #  d/dt (P) = d/dT (Psat) * dT/dt  [chain rule]
-            # note we don't use P_u when determining d/dT (Psat) since that
-            # will lead to runaway error when P_u (inevitably) deviates
-            # slightly from the genuine saturation pressure.
-            dPdT_u = (PropsSI("P", "T", T_u + DT, "Q", 0, s.ox_type)
-                    - PropsSI("P", "T", T_u, "Q", 0, s.ox_type)) / DT
-            dP_u = dPdT_u * dT_u
 
 
             # TODO: sim cc
@@ -597,15 +563,33 @@ def simulate_burn(s, top):
             debugme["V_l_u"] = V_l_u
             debugme["V_v_u"] = V_v_u
             debugme["propV_u"] = (V_l_u + V_v_u) / V_u
-            debugme["propP_u"] = P_u / PropsSI("P", "T", T_u, "Q", 0, s.ox_type)
 
-        # Otherwise vapour draining
+        # Otherwise vapour draining.
         elif m_v_u > negligible_mass:
             dm_l_u = 0.0 # liquid mass is ignored hence fourth (big word init).
 
-            gamma_u = (PropsSI("C", "P", P_u, "T", T_u, s.ox_type)
-                     / PropsSI("O", "P", P_u, "T", T_u, s.ox_type))
-            Z_u = PropsSI("Z", "P", P_u, "T", T_u, s.ox_type)
+            # During this period, temperature and density are used to fully
+            # define the state (density is simple due to fixed volume).
+            rho_u = m_v_u / V_u
+
+            # Due to numerical inaccuracy, might technically have the properties
+            # of a saturated mixture so just pretend its a saturated vapour.
+            rhosat_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
+            if rho_u >= rhosat_u:
+                rho_u = rhosat_u
+
+            # Now can get pressure.
+            P_u = PropsSI("P", "T", T_u, "D", rho_u, s.ox_type)
+
+
+            # Find injector flow rate.
+
+            if P_u / P_d <= pressure_ratio_cutoff:
+                raise Exception("injector pressure ratio too small")
+
+            gamma_u = (PropsSI("C", "T", T_u, "D", rho_u, s.ox_type)
+                     / PropsSI("O", "T", T_u, "D", rho_u, s.ox_type))
+            Z_u = PropsSI("Z", "T", T_u, "D", rho_u, s.ox_type)
 
             foo = 2 / (gamma_u + 1)
             critical_pressure_ratio = foo ** (gamma_u / (gamma_u + 1))
@@ -616,32 +600,54 @@ def simulate_burn(s, top):
                 rootme = critical_pressure_ratio * foo # dujj.
                 rootme *= gamma_u / Z_u / R_u / T_u
                 dminj = Cd * Ainj * P_u * np.sqrt(rootme)
-                print("choked")
             # Otherwise un-choked flow.
             else:
                 rootme = inverse_pressure_ratio ** (2 / gamma_u)
                 rootme -= inverse_pressure_ratio ** ((gamma_u + 1) / gamma_u)
                 rootme *= 2 * gamma_u / Z_u / R_u / T_u / (gamma_u - 1)
                 dminj = Cd * Ainj * P_u * np.sqrt(rootme)
-                print("unchoked")
 
-
-
+            # Mass only leaves through injector, and no state change.
             dm_v_u = -dminj
 
-            dT_u = 0.0
-            dP_u = 0.0
+
+            # Back to the well.
+            #  d/dt (U) = -dminj * h  [first law of thermodynamics, adiabatic]
+            #  d/dt (U_w + U) = -dminj * h  [no suffix is the non-saturated vapour in the tank]
+            #  d/dt (m_w*u_w) + d/dt (m*u) = -dminj * h
+            #  -dminj * h = dm_w*u_w + m_w*du_w
+            #             + dm*u + m*du
+            # dm_w = 0  [wall aint going anywhere]
+            # dm = -dminj  [only mass change is from injector]
+            #  -dminj * h = m_w * du_w
+            #             - dminj * u
+            #             + m * du
+            #  dminj * (u - h) = m_w * du_w + m * du
+            # du = dT * cv  [previously derived]
+            #  dminj * (u - h) = dT * (m_w * cv_w + m * cv)
+            # let: Cv = m_w * cv_w + m * cv
+            #  dminj * (u - h) = dT * Cv
+            # => dT = dminj * (u - h) / Cv
+            # which makes sense, since only energy change is due to lost flow work.
+
+            u_u = PropsSI("U", "T", T_u, "D", rho_u, s.ox_type)
+            h_u = PropsSI("H", "T", T_u, "D", rho_u, s.ox_type)
+
+            Cv = Cwall + m_v_u * PropsSI("O", "T", T_u, "D", rho_u, s.ox_type)
+
+            dT_u = dminj * (u_u - h_u) / Cv
+
+
 
             # TODO: sim cc
             dP_d = 0.0
 
 
+
             # Still debug volume justin caseme.
-            V_v_u = m_v_u / PropsSI("D", "P", P_u, "T", T_u, s.ox_type)
             debugme["V_l_u"] = 0.0
-            debugme["V_v_u"] = V_v_u
-            debugme["propV_u"] = V_v_u / V_u
-            debugme["propP_u"] = 0.0
+            debugme["V_v_u"] = V_u
+            debugme["propV_u"] = 1.0
 
         else:
             # huh.
@@ -650,11 +656,10 @@ def simulate_burn(s, top):
 
             debugme["V_l_u"] = 0.0
             debugme["V_v_u"] = 0.0
-            debugme["propV_u"] = 0.0
-            debugme["propP_u"] = 0.0
+            debugme["propV_u"] = 1.0
 
 
-        return dm_l_u, dm_v_u, dT_u, dP_u, dP_d
+        return dm_l_u, dm_v_u, dT_u, dP_d
 
 
     try:
@@ -662,8 +667,7 @@ def simulate_burn(s, top):
             [m0_l_u],
             [m0_v_u],
             [T0_u],
-            [P0_u],
-            [s.injector_initial_pressure_ratio * P0_u],
+            [P0_d],
         ]
         # Simulate just for some time, TODO: figure out what is
         # considered the termination of the burn.
@@ -677,9 +681,9 @@ def simulate_burn(s, top):
             # explicit euler it is.
             dstate = df(*[v[-1] for v in state])
             assert len(dstate) == len(state)
-            for dv, v in zip(dstate, state):
-                Dv = Dt * dv
-                v.append(v[-1] + Dv)
+            for dprop, prop in zip(dstate, state):
+                Dprop = Dt * dprop
+                prop.append(prop[-1] + Dprop)
 
     except Exception:
         traceback.print_exc()
@@ -687,18 +691,37 @@ def simulate_burn(s, top):
     print(f"Finished burn sim in {time.time() - _start_time:.2f}s")
 
 
-    m_l_u, m_v_u, T_u, P_u, P_d = state
+    m_l_u, m_v_u, T_u, P_d = state
+    m_l_u = np.array(m_l_u)
+    m_v_u = np.array(m_v_u)
+    T_u = np.array(T_u)
+    P_d = np.array(P_d)
+
+    # Reconstruct pressure over time.
+    P_u = np.zeros(len(T_u), dtype=float)
+    try:
+        # saturated pressure:
+        Pmask = (m_l_u > negligible_mass)
+        Psat = [PropsSI("P", "T", T, "Q", 0, s.ox_type) for T in T_u[Pmask]]
+        P_u[Pmask] = Psat
+        # not:
+        Pmask = ~Pmask & (m_v_u > negligible_mass)
+        Pnot = [PropsSI("P", "T", T, "D", m / V_u, s.ox_type) for T, m in zip(T_u[Pmask], m_v_u[Pmask])]
+        P_u[Pmask] = Pnot
+    except Exception:
+        pass
+
 
     s.burn_time = (len(m_l_u) - 1) * Dt
     t = np.linspace(0, s.burn_time, len(m_l_u))
     mask = np.ones(len(t), dtype=bool)
     # mask = (np.arange(len(t)) >= int(0.85 * len(t)))
 
-    s.tank_pressure = np.array(P_u)
-    s.cc_pressure = np.array(P_d)
-    s.tank_temperature = np.array(T_u)
-    s.ox_mass_liquid = np.array(m_l_u)
-    s.ox_mass_vapour = np.array(m_v_u)
+    s.tank_pressure = P_u
+    s.cc_pressure = P_d
+    s.tank_temperature = T_u
+    s.ox_mass_liquid = m_l_u
+    s.ox_mass_vapour = m_v_u
     s.ox_mass = s.ox_mass_liquid + s.ox_mass_vapour
     if len(s.ox_mass) == 1:
         dminj = np.array([0.0])
@@ -707,8 +730,8 @@ def simulate_burn(s, top):
         dminj = np.append(dminj, dminj[-1])
     s.injector_mass_flow_rate = -dminj / Dt
 
-    qual = s.ox_mass_vapour/s.ox_mass
-    qual[s.ox_mass_liquid <= negligible_mass] = 1.0
+    qual = s.ox_mass_vapour / s.ox_mass
+    qual[~(s.ox_mass_liquid > negligible_mass)] = 1.0
 
     plotme = [
         (s.tank_pressure, "Tank pressure", "Pressure [Pa]"),
@@ -747,7 +770,8 @@ def simulate_burn(s, top):
             plt.grid()
         plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)
     doplot(plotme)
-    doplot([(v[0], k, v[1]) for k, v in debugme.state.items()])
+    if plot_debugme:
+        doplot([(v[0], k, v[1]) for k, v in debugme.state.items()])
     plt.show()
 
     return new_top
