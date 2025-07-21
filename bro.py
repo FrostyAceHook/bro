@@ -83,7 +83,8 @@ class Sys:
         s.locked_local_com = INPUT # [m]
         s.locked_com = ... # [m]
 
-        s.tank_length = OUTPUT # [m]
+        s.tank_inner_length = OUTPUT # [m]
+        s.tank_length = ... # [m]
         s.tank_com = ... # [m]
         s.tank_wall_density = INPUT # [kg/m^3]
         s.tank_wall_yield_strength = INPUT # [Pa]
@@ -128,7 +129,7 @@ class Sys:
         s.cc_wall_mass = ... # [kg]
         s.cc_wall_com = ... # [m]
 
-        s.fuel_type = INPUT # must be "paraffin"
+        s.fuel_type = INPUT # must be "PARAFFIN"
         s.fuel_length = OUTPUT # [m]
         s.fuel_thickness = OUTPUT # [m]
         s.fuel_density = ... # [kg/m^3]
@@ -157,6 +158,8 @@ class Sys:
         s.rocket_altitude = ... # [m, over time]
 
         s.environment_temperature = INPUT # [K]
+        s.injector_pressure_ratio_cutoff = INPUT # [-]
+        s.tank_worstcase_temperature = INPUT # [K]
         s.burn_time = ... # [s]
         s.integration_dt = INPUT # [s]
 
@@ -322,10 +325,10 @@ class Cylinder:
 
 
 
-def simulate_burn(s, top):
+def simulate_burn(s):
     """
     Simulates the motor burn, with tank venting and combustion chamber
-    combusting. Also does the tank properties like mass and such.
+    combusting. Requires the tank specs to be set in the system.
     """
     _start_time = time.time()
 
@@ -341,48 +344,33 @@ def simulate_burn(s, top):
     # dX = time derivative
     # DX = discrete change
 
-    Dt = s.integration_dt
-    DT = Dt * 2.0 # use for numerical derivatives over temperature.
-    negligible_mass = 0.001
-    Cd = s.injector_discharge_coeff
-    Ainj = s.injector_orifice_area
-    T0_u = s.environment_temperature
-    P0_u = PropsSI("P", "T", T0_u, "Q", 0, s.ox_type)
-    R_u = PropsSI("GAS_CONSTANT", s.ox_type) / PropsSI("M", s.ox_type)
-    pressure_ratio_cutoff = 1.0 # upstream / downstream
+    Dt = s.integration_dt # [s]
+    DT = Dt * 2.0 # [K] use for numerical derivatives over temperature.
+    negligible_mass = 0.005 # [kg]
+    Cd = s.injector_discharge_coeff # [-]
+    Ainj = s.injector_orifice_area # [m^2]
+    R_u = PropsSI("GAS_CONSTANT", s.ox_type) / PropsSI("M", s.ox_type) # [J/kg/K]
+    Pr_cutoff = s.injector_pressure_ratio_cutoff # [-]
 
-
-    # Now that we have max pressure (which happens immediately), we can
-    # establish the tank walls.
-    tank_wall_cyl = Cylinder.pipe(s.tank_length, outer_diameter=s.rocket_diameter)
-    tank_wall_cyl.set_thickness_for_stress(P0_u, s.tank_wall_yield_strength)
-    tank_wall_end_cyl = Cylinder.solid(tank_wall_cyl.thickness,
-                                       tank_wall_cyl.outer_diameter)
-    tank_cyl = Cylinder.solid(s.tank_length, tank_wall_cyl.inner_diameter)
-
-    s.tank_com = tank_wall_cyl.thickness + tank_wall_cyl.com(top)
-    s.tank_wall_thickness = tank_wall_cyl.thickness
-    s.tank_wall_mass = tank_wall_cyl.mass(s.tank_wall_density) \
-                     + 2 * tank_wall_end_cyl.mass(s.tank_wall_density)
-    new_top = top + s.tank_length + 2 * tank_wall_cyl.thickness
-
-    # Now that we have the tank fully defined, determine initial ox levels.
-    V_u = tank_cyl.volume()
-    V0_l_u = V_u * s.ox_volume_fill_frac
-    V0_v_u = V_u * (1 - s.ox_volume_fill_frac)
-    m0_l_u = V0_l_u * PropsSI("D", "T", T0_u, "Q", 0, s.ox_type)
-    m0_v_u = V0_v_u * PropsSI("D", "T", T0_u, "Q", 1, s.ox_type)
-    x0_u = m0_v_u / (m0_l_u + m0_v_u)
     # Heat capacity of tank walls (note Cp ~= Cv for solids).
     Cwall = s.tank_wall_specific_heat_capacity * s.tank_wall_mass
 
-    # Justa coupel more sys properties.
-    s.tank_volume = V_u
-    s.ox_initial_mass = m0_l_u + m0_v_u
-
+    # Determine initial properties.
+    T0_u = s.environment_temperature
+    tank_inner_diameter = s.rocket_diameter - s.tank_wall_thickness
+    V_u = Cylinder.solid(s.tank_inner_length, tank_inner_diameter).volume()
+    V0_l_u = V_u * s.ox_volume_fill_frac
+    V0_v_u = V_u - V0_l_u
+    m0_l_u = V0_l_u * PropsSI("D", "T", T0_u, "Q", 0, s.ox_type)
+    m0_v_u = V0_v_u * PropsSI("D", "T", T0_u, "Q", 1, s.ox_type)
 
     # TODO: initial cc pressure?
-    P0_d = s.injector_initial_pressure_ratio * P0_u
+    P0_d = s.injector_initial_pressure_ratio * PropsSI("P", "T", T0_u, "Q", 0, s.ox_type)
+
+
+    # Save a coupel more sys properties.
+    s.tank_volume = V_u
+    s.ox_initial_mass = m0_l_u + m0_v_u
 
 
     @singleton
@@ -419,7 +407,7 @@ def simulate_burn(s, top):
 
             # Find injector flow rate.
 
-            if P_u / P_d <= pressure_ratio_cutoff:
+            if P_u / P_d <= Pr_cutoff:
                 raise Exception("injector pressure ratio too small")
 
             # Single-phase incompressible model (with Beta = 0):
@@ -584,7 +572,7 @@ def simulate_burn(s, top):
 
             # Find injector flow rate.
 
-            if P_u / P_d <= pressure_ratio_cutoff:
+            if P_u / P_d <= Pr_cutoff:
                 raise Exception("injector pressure ratio too small")
 
             gamma_u = (PropsSI("C", "T", T_u, "D", rho_u, s.ox_type)
@@ -606,6 +594,9 @@ def simulate_burn(s, top):
                 rootme -= inverse_pressure_ratio ** ((gamma_u + 1) / gamma_u)
                 rootme *= 2 * gamma_u / Z_u / R_u / T_u / (gamma_u - 1)
                 dminj = Cd * Ainj * P_u * np.sqrt(rootme)
+            # Note that the flow rate is discontinuous as it changes from choked
+            # to unchoked, but i think this is the reality and not a simulation
+            # error/quirk.
 
             # Mass only leaves through injector, and no state change.
             dm_v_u = -dminj
@@ -736,7 +727,7 @@ def simulate_burn(s, top):
     plotme = [
         (s.tank_pressure, "Tank pressure", "Pressure [Pa]"),
         (s.cc_pressure, "CC pressure", "Pressure [Pa]"),
-        (s.tank_temperature, "Tank temperature", "Temperature [K]"),
+        (s.tank_temperature - 273.15, "Tank temperature", "Temperature [dC]"),
         (s.injector_mass_flow_rate, "Injector mass flow rate", "Mass flow rate [kg/s]"),
         (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]"),
         (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]"),
@@ -774,8 +765,6 @@ def simulate_burn(s, top):
         doplot([(v[0], k, v[1]) for k, v in debugme.state.items()])
     plt.show()
 
-    return new_top
-
 
 
 
@@ -795,7 +784,7 @@ def cost(s):
                     f"sys[{repr(name)}]")
 
     assert s.ox_type == "N2O"
-    assert s.fuel_type == "paraffin"
+    assert s.fuel_type == "PARAFFIN"
 
 
     # Firstly get the easy masses/coms/length out of the way.
@@ -805,7 +794,28 @@ def cost(s):
     s.locked_com = top + s.locked_local_com
     top += s.locked_length
 
-    top += simulate_burn(s, top) # does burn and tank properties.
+
+    # Find worst-case initial saturated tank pressure, which is the max tank pressure.
+    tank_max_pressure = PropsSI("P", "T", s.tank_worstcase_temperature, "Q", 0, s.ox_type)
+    # Determine tank specs from the max pressure.
+    tank_wall_cyl = Cylinder.pipe(s.tank_inner_length, outer_diameter=s.rocket_diameter)
+    tank_wall_cyl.set_thickness_for_stress(tank_max_pressure,
+                                           s.tank_wall_yield_strength,
+                                           sf=3.5)
+    # TODO: establish exact tank mass, for now just assume thick ends.
+    tank_wall_end_cyl = Cylinder.solid(2 * tank_wall_cyl.thickness,
+                                       tank_wall_cyl.outer_diameter)
+
+    s.tank_length = s.tank_inner_length + 2 * tank_wall_end_cyl.length
+    s.tank_com = top + s.tank_length / 2
+    s.tank_wall_thickness = tank_wall_cyl.thickness
+    s.tank_wall_mass = tank_wall_cyl.mass(s.tank_wall_density) \
+                     + 2 * tank_wall_end_cyl.mass(s.tank_wall_density)
+    top += s.tank_length
+
+    # Burn me.
+    simulate_burn(s)
+
 
     s.mov_com = top + s.mov_local_com
     top += s.mov_length
@@ -818,7 +828,7 @@ def cost(s):
     s.cc_post_length = 1.5 * s.cc_diameter
     s.cc_length = s.cc_pre_length + s.fuel_length + s.cc_post_length
     cc_wall_cyl = Cylinder.pipe(s.cc_length, inner_diameter=s.cc_diameter)
-    cc_wall_cyl.set_thickness_for_stress(max(s.cc_pressure), s.cc_wall_yield_strength)
+    cc_wall_cyl.set_thickness_for_stress(s.cc_pressure.max(), s.cc_wall_yield_strength)
     s.cc_wall_thickness = cc_wall_cyl.thickness
     s.cc_wall_mass = cc_wall_cyl.mass(s.cc_wall_density)
     s.cc_wall_com = cc_wall_cyl.com(top)
@@ -831,7 +841,7 @@ def cost(s):
     s.fuel_mass = np.linspace(s.fuel_initial_mass, 0, len(s.ox_mass))
     top += s.cc_length
 
-    # TEMP, nasacea does it i think.
+    # TODO: nozzle specs
     s.nozzle_length = 0.10
     s.nozzle_com = top + 0.05
     s.nozzle_mass = 2
@@ -872,7 +882,7 @@ sys.locked_mass = 5.0 # [kg]
 sys.locked_length = 2.0 # [m]
 sys.locked_local_com = 1.3 # downwards from top, [m]
 
-sys.tank_length = 0.55 # [m], OUTPUT
+sys.tank_inner_length = 0.55 # [m], OUTPUT
 sys.tank_wall_density = 2720.0 # Al6061, [kg/m^3]
 sys.tank_wall_yield_strength = 241e6 # Al6061, [Pa]
 sys.tank_wall_specific_heat_capacity = 896 # Al6061, [J/kg/K]
@@ -895,7 +905,7 @@ sys.cc_diameter = 0.060 # [m], OUTPUT
 sys.cc_wall_density = 2720.0 # Al6061, [kg/m^3]
 sys.cc_wall_yield_strength = 241e6 # Al6061, [Pa]
 
-sys.fuel_type = "paraffin" # required.
+sys.fuel_type = "PARAFFIN" # required.
 sys.fuel_length = 0.2 # [m], OUTPUT
 sys.fuel_thickness = 0.017 # [m], OUTPUT
 
@@ -906,7 +916,9 @@ sys.rocket_target_apogee = 30000 / 3.281 # [m]
 sys.rocket_diameter = 0.145 # [m]
 sys.rocket_stability = 1.5 # [-?]
 
-sys.environment_temperature = 20 + 273.15 # [K]
+sys.environment_temperature = 25 + 273.15 # [K]
+sys.injector_pressure_ratio_cutoff = 1.0 # [-]
+sys.tank_worstcase_temperature = 35 + 273.15 # 36.4dC is critical temp of N2O, [K]
 sys.integration_dt = 0.02 # [-]
 
 cost(sys)
