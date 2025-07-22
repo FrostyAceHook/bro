@@ -4,7 +4,11 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 from CoolProp.CoolProp import PropsSI
-from scipy.optimize import root_scalar
+from rocketcea import cea_obj
+from rocketcea.cea_obj_w_units import CEA_Obj
+
+GAS_CONSTANT = 8.31446261815324 # [J/K/mol]
+
 
 
 def singleton(cls):
@@ -57,6 +61,53 @@ def frozen(cls):
 
 
 
+
+class Propellant:
+    TEMPERATURE = 293.15
+
+    def __init__(self, name, kind, composition, hf, rho):
+        """
+        name: unique string id.
+        kind: startswith 'fu' or 'ox'.
+        composition: string of chemical formula, of the form "X0 N0 X1 N1 ..." where
+                     Xn is atomic symbol and Nn is number of atoms.
+        hf: enthalpy of formation, in kcal/mol.
+        rho: density at `Propellant.TEMPERATURE`, in kg/m^3.
+        """
+        self.name = name
+        self.density = rho
+
+        # use the same kind detection as nasa cea fortran code.
+        if kind[:2] == "fu":
+            kind = "fu"
+            adder = cea_obj.add_new_fuel
+        elif kind[:2] == "ox":
+            kind = "ox"
+            adder = cea_obj.add_new_oxidizer
+        else:
+            assert False, "invalid kind"
+        adder(name,
+            f"{kind} {name} {composition}\n"
+            f"h,kc={hf:.1f}\n"
+            f"t,k={self.TEMPERATURE}\n"
+            f"rho,kg={rho:.1f}\n"
+        )
+
+    def prop(self, *args):
+        """
+        Forwards to PropsSI for this oxidiser.
+        """
+        return PropsSI(*args, self.name)
+
+# Formulas and enthalpy of formation from Hybrid Rocket Propulsion Handbook, Karp & Jens.
+PARAFFIN = Propellant("PARAFFIN", "fuel", "C 32 H 66",
+        hf=-224.2, rho=924.5)
+N2O = Propellant("N2O", "oxidiser", "N 2 O 1",
+        hf=15.5, rho=PropsSI("D", "T", Propellant.TEMPERATURE, "Q", 0, "N2O"))
+
+
+
+
 @singleton
 class INPUT:
     def __repr__(self):
@@ -91,13 +142,11 @@ class Sys:
         s.tank_wall_specific_heat_capacity = INPUT # [J/kg/K]
         s.tank_wall_thickness = ... # [m]
         s.tank_wall_mass = ... # [kg]
-        s.tank_volume = ... # [m^3]
         s.tank_temperature = ... # [K, over time]
         s.tank_pressure = ... # [Pa, over time]
 
-        s.ox_type = INPUT # must be "N2O"
+        s.ox_type = INPUT # must be `N2O`
         s.ox_volume_fill_frac = INPUT # [-]
-        s.ox_initial_mass = ... # [kg]
         s.ox_mass = ... # [kg, over time]
         s.ox_mass_liquid = ... # [kg, over time]
         s.ox_mass_vapour = ... # [kg, over time]
@@ -115,7 +164,6 @@ class Sys:
         s.injector_discharge_coeff = INPUT # [-]
         s.injector_orifice_area = OUTPUT # [m^2]
         s.injector_initial_pressure_ratio = INPUT # [-]
-        s.injector_mass_flow_rate = ... # [kg/s, over time]
 
         s.cc_diameter = OUTPUT # [m]
         s.cc_temperature = ... # [K, over time]
@@ -129,11 +177,9 @@ class Sys:
         s.cc_wall_mass = ... # [kg]
         s.cc_wall_com = ... # [m]
 
-        s.fuel_type = INPUT # must be "PARAFFIN"
+        s.fuel_type = INPUT # must be `PARAFFIN`
         s.fuel_length = OUTPUT # [m]
-        s.fuel_thickness = OUTPUT # [m]
-        s.fuel_density = ... # [kg/m^3]
-        s.fuel_initial_mass = ... # [kg]
+        s.fuel_initial_thickness = OUTPUT # [m]
         s.fuel_mass = ... # [kg, over time]
         s.fuel_com = ... # [m]
 
@@ -157,11 +203,12 @@ class Sys:
         s.rocket_net_force = ... # [N, over time]
         s.rocket_altitude = ... # [m, over time]
 
-        s.environment_temperature = INPUT # [K]
-        s.injector_pressure_ratio_cutoff = INPUT # [-]
+        s.ambient_temperature = INPUT # [K]
+        s.ambient_pressure = INPUT # [Pa]
         s.tank_worstcase_temperature = INPUT # [K]
+        s.regression_rate_coeff = INPUT # [-]
+        s.regression_rate_exp = INPUT # [.]
         s.burn_time = ... # [s]
-        s.integration_dt = INPUT # [s]
 
     @classmethod
     def input_names(cls):
@@ -332,99 +379,127 @@ def simulate_burn(s):
     """
     _start_time = time.time()
 
-    assert s.ox_type == "N2O"
+    assert s.ox_type is N2O
+    assert s.fuel_type is PARAFFIN
+    ox = s.ox_type
+    fuel = s.fuel_type
+
+    # Coupla cylinders.
+    fuel_cyl = Cylinder.pipe(s.fuel_length, outer_diameter=s.cc_diameter)
+    fuel_cyl.thickness = s.fuel_initial_thickness
+    tank_inner_diameter = s.rocket_diameter - s.tank_wall_thickness
+    tank_cyl = Cylinder.solid(s.tank_inner_length, tank_inner_diameter)
+
 
     # legend (shoutout charle):
+    #
     # X0 = initial
-    # X_l = liquid
-    # X_v = vapour
-    # X_u = upstream (tank)
-    # X_d = downstream (cc)
-    # X_w = tank wall (considered heat sink)
     # dX = time derivative
     # DX = discrete change
+    #
+    # X_l = ox liquid
+    # X_v = ox vapour
+    # X_o = ox (in cc)
+    # X_f = fuel
+    #
+    # X_t = tank
+    # X_c = cc
+    # X_w = tank wall (for heat sink)
+    #
+    # X_inj = injector
+    # X_u = upstream (tank-side of injector)
+    # X_d = downstream (cc-side of injector)
 
-    Dt = s.integration_dt # [s]
-    DT = Dt * 2.0 # [K] use for numerical derivatives over temperature.
-    negligible_mass = 0.005 # [kg]
-    Cd = s.injector_discharge_coeff # [-]
-    Ainj = s.injector_orifice_area # [m^2]
-    Rspecific_u = PropsSI("GAS_CONSTANT", s.ox_type) / PropsSI("M", s.ox_type) # [J/kg/K]
-    Pr_cutoff = s.injector_pressure_ratio_cutoff # [-]
+    # Various system constants.
+    Dt = 0.03 # discrete calculus over time.
+    DT = 0.08 # discrete calculus over temperature.
+    negligible_mass = 0.005
+    Rox = GAS_CONSTANT / ox.prop("M")
+    Cd_inj = s.injector_discharge_coeff
+    A_inj = s.injector_orifice_area
+    rho_f = fuel.density
+    L_f = fuel_cyl.length
+    OD_f = fuel_cyl.outer_diameter
+    V_t = tank_cyl.volume()
+    c_w = s.tank_wall_specific_heat_capacity # note cp ~= cv for solids.
+    C_w = s.tank_wall_mass * c_w
 
-    # Heat capacity of tank walls (note Cp ~= Cv for solids).
-    Cwall = s.tank_wall_specific_heat_capacity * s.tank_wall_mass
+    # Regression rate parameters.
+    rr_a0 = s.regression_rate_coeff
+    rr_n = s.regression_rate_exp
+
 
     # Determine initial properties.
-    T0_u = s.environment_temperature
-    tank_inner_diameter = s.rocket_diameter - s.tank_wall_thickness
-    V_u = Cylinder.solid(s.tank_inner_length, tank_inner_diameter).volume()
-    V0_l_u = V_u * s.ox_volume_fill_frac
-    V0_v_u = V_u - V0_l_u
-    m0_l_u = V0_l_u * PropsSI("D", "T", T0_u, "Q", 0, s.ox_type)
-    m0_v_u = V0_v_u * PropsSI("D", "T", T0_u, "Q", 1, s.ox_type)
+    T0_t = s.ambient_temperature
+    V0_l = V_t * s.ox_volume_fill_frac
+    V0_v = V_t - V0_l
+    m0_l = V0_l * ox.prop("D", "T", T0_t, "Q", 0)
+    m0_v = V0_v * ox.prop("D", "T", T0_t, "Q", 1)
+    D0_f = fuel_cyl.inner_diameter
 
-    # TODO: initial cc pressure?
-    P0_d = s.injector_initial_pressure_ratio * PropsSI("P", "T", T0_u, "Q", 0, s.ox_type)
+    # TODO: initial cc pressure
+    P0_c = s.injector_initial_pressure_ratio * ox.prop("P", "T", T0_t, "Q", 0)
 
-
-    # Save a coupel more sys properties.
-    s.tank_volume = V_u
-    s.ox_initial_mass = m0_l_u + m0_v_u
 
 
     @singleton
     class debugme:
         def __init__(self):
             self.state = {
-                "V_l_u": ([], "Volume [m^3]"),
-                "V_v_u": ([], "Volume [m^3]"),
-                "propV_u": ([], "Volume [m^3]"),
             }
         def __setitem__(self, name, value):
             self.state[name][0].append(value)
     plot_debugme = False
 
 
-    # Only state tracked is:
-    # - liquid mass (happens to always be saturated)
-    # - vapour mass (only saturated if liquid mass > negligible)
-    # - tank temperature
-    # - cc pressure
+    # Tracked state (all of which changes over time and is described
+    # by differentials) is:
+    # - m_l: tank liquid mass (happens to always be saturated)
+    # - m_v: tank vapour mass (only saturated if liquid mass > negligible)
+    # - T_t: tank temperature
+    # - P_c: cc pressure
+    # - D_f: fuel grain inner diameter
     # This is enough to fully define the system at all times (when
-    # combined with the constant tank volume).
+    # combined with the constants).
 
-    def df(m_l_u, m_v_u, T_u, P_d):
+
+    def df(m_l, m_v, T_t, P_c, D_f):
         """
         Returns the time derivatives of all input variables.
         """
 
-        # Saturated liquid draining while there's any liquid in the tank.
-        if m_l_u > negligible_mass:
-            # Saturated pressure.
-            P_u = PropsSI("P", "T", T_u, "Q", 0, s.ox_type)
+        # Properties determined by injector:
+        dm_l = 0.0
+        dm_v = 0.0
+        dm_o = 0.0
+        dT_t = 0.0
 
+        # Liquid draining while there's any liquid in the tank.
+        if m_l > negligible_mass:
 
             # Find injector flow rate.
 
-            if P_u / P_d <= Pr_cutoff:
+            P_u = ox.prop("P", "T", T_t, "Q", 0) # tank at saturated pressure.
+            P_d = P_c
+
+            if P_u / P_d <= 1:
                 raise Exception("injector pressure ratio too small")
 
             # Single-phase incompressible model (with Beta = 0):
-            # (assuming upstream saturated liquid density as the "incompressible" density)
-            rho_l_u = PropsSI("D", "P", P_u, "Q", 0, s.ox_type)
-            mdot_SPI = Cd * Ainj * np.sqrt(2 * rho_l_u * (P_u - P_d))
+            # (assuming upstream density as the "incompressible" density)
+            rho_u = ox.prop("D", "P", P_u, "Q", 0)
+            mdot_SPI = Cd_inj * A_inj * np.sqrt(2 * rho_u * (P_u - P_d))
 
             # Homogenous equilibrium model:
             # (assuming only saturated liquid leaving from upstream)
-            s_u = PropsSI("S", "P", P_u, "Q", 0, s.ox_type)
-            s_l_d = PropsSI("S", "P", P_d, "Q", 0, s.ox_type)
-            s_v_d = PropsSI("S", "P", P_d, "Q", 1, s.ox_type)
-            x_d = (s_u - s_l_d) / (s_v_d - s_l_d)
-            h_u = PropsSI("H", "P", P_u, "Q", 0, s.ox_type)
-            h_d = PropsSI("H", "P", P_d, "Q", x_d, s.ox_type)
-            rho_d = PropsSI("D", "P", P_d, "Q", x_d, s.ox_type)
-            mdot_HEM = Cd * Ainj * rho_d * np.sqrt(2 * (h_u - h_d))
+            s_u = ox.prop("S", "P", P_u, "Q", 0)
+            s_d_l = ox.prop("S", "P", P_d, "Q", 0)
+            s_d_v = ox.prop("S", "P", P_d, "Q", 1)
+            x_d = (s_u - s_d_l) / (s_d_v - s_d_l)
+            h_u = ox.prop("H", "P", P_u, "Q", 0)
+            h_d = ox.prop("H", "P", P_d, "Q", x_d)
+            rho_d = ox.prop("D", "P", P_d, "Q", x_d)
+            mdot_HEM = Cd_inj * A_inj * rho_d * np.sqrt(2 * (h_u - h_d))
 
             # Generalised non-homogenous non-equilibrium model:
             # (assuming that P_sat is upstream saturation, and so is alaways
@@ -437,7 +512,7 @@ def simulate_burn(s):
             #  kappa = sqrt(1) = 1
             kappa = 1
             k_NHNE = 1 / (1 + kappa)
-            dminj = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE
+            dm_o = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE
 
 
             # To determine temperature and vapourised mass derivatives,
@@ -448,138 +523,126 @@ def simulate_burn(s):
             #  d/dt (m_l / rho_l) + d/dt (m_v / rho_v) = 0
             #  0 = (dm_l * rho_l - m_l * drho_l) / rho_l**2  [quotient rule]
             #    + (dm_v * rho_v - m_v * drho_v) / rho_v**2
-            # dm_l = -dminj - dm_v  [injector and vapourisation]
-            #  0 = ((-dminj - dm_v) * rho_l - m_l * drho_l) / rho_l**2
+            # dm_l = -dm_o - dm_v  [injector and vapourisation]
+            #  0 = ((-dm_o - dm_v) * rho_l - m_l * drho_l) / rho_l**2
             #    + (dm_v * rho_v - m_v * drho_v) / rho_v**2
-            #  0 = -dminj / rho_l
+            #  0 = -dm_o / rho_l
             #    - dm_v / rho_l
             #    - m_l * drho_l / rho_l**2
             #    + dm_v / rho_v
             #    - m_v * drho_v / rho_v**2
             #  0 = dm_v * (1/rho_v - 1/rho_l)
-            #    - dminj / rho_l
+            #    - dm_o / rho_l
             #    - m_l * drho_l / rho_l**2
             #    - m_v * drho_v / rho_v**2
             # drho = d/dt (rho) = d/dT (rho) * dT/dt  [chain rule]
             # drhodT = d/dT (rho)
             #  0 = dm_v * (1/rho_v - 1/rho_l)
-            #    - dminj / rho_l
+            #    - dm_o / rho_l
             #    - m_l * dT * drhodT_l / rho_l**2
             #    - m_v * dT * drhodT_v / rho_v**2
-            #  dm_v = (dminj / rho_l
+            #  dm_v = (dm_o / rho_l
             #         + m_l * dT * drhodT_l / rho_l**2
             #         + m_v * dT * drhodT_v / rho_v**2
             #         ) / (1/rho_v - 1/rho_l)
-            #  dm_v = dminj / rho_l / (1/rho_v - 1/rho_l)
+            #  dm_v = dm_o / rho_l / (1/rho_v - 1/rho_l)
             #       + dT / (1/rho_v - 1/rho_l) * (m_l * drhodT_l / rho_l**2
             #                                   + m_v * drhodT_v / rho_v**2)
             # let:
-            #   foo = dminj / rho_l / (1/rho_v - 1/rho_l)
+            #   foo = dm_o / rho_l / (1/rho_v - 1/rho_l)
             #   bar = (m_l * drhodT_l / rho_l**2
             #        + m_v * drhodT_v / rho_v**2) / (1/rho_v - 1/rho_l)
             #  dm_v = foo + dT * bar
             # So, dm_v depends on dT, but also vice versa:
-            #  d/dt (U) = -dminj * h_l  [first law of thermodynamics, adiabatic]
-            #  d/dt (U_w + U_l + U_v) = -dminj * h_l
-            #  d/dt (m_w*u_w) + d/dt (m_l*u_l) + d/dt (m_v*u_v) = -dminj * h_l
-            #  -dminj * h_l = dm_w*u_w + m_w*du_w
-            #               + dm_l*u_l + m_l*du_l
-            #               + dm_v*u_v + m_v*du_v
+            #  d/dt (U) = -dm_o * h_l  [first law of thermodynamics, adiabatic]
+            #  d/dt (U_w + U_l + U_v) = -dm_o * h_l
+            #  d/dt (m_w*u_w) + d/dt (m_l*u_l) + d/dt (m_v*u_v) = -dm_o * h_l
+            #  -dm_o * h_l = dm_w*u_w + m_w*du_w
+            #              + dm_l*u_l + m_l*du_l
+            #              + dm_v*u_v + m_v*du_v
             # dm_w = 0  [wall aint going anywhere]
-            # dm_l = -dm_v - dminj  [same as earlier]
-            #  -dminj * h_l = m_w*du_w + m_l*du_l + m_v*du_v
-            #               + (-dm_v - dminj) * u_l
-            #               + dm_v*u_v
-            #  dminj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
-            #                      - dm_v*u_l
-            #                      + dm_v*u_v
-            #  dminj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
-            #                      + dm_v * (u_v - u_l)
+            # dm_l = -dm_v - dm_o  [same as earlier]
+            #  -dm_o * h_l = m_w*du_w + m_l*du_l + m_v*du_v
+            #              + (-dm_v - dm_o) * u_l
+            #              + dm_v*u_v
+            #  dm_o * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
+            #                     - dm_v*u_l
+            #                     + dm_v*u_v
+            #  dm_o * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
+            #                     + dm_v * (u_v - u_l)
             # du = d/dt (u) = d/dT (u) * dT/dt
             # also note:
             #   u = int (cv) dT
             #   d/dT (u) = cv
             # therefore:
             #   du = dT * cv
-            #  dminj * (u_l - h_l) = dT * (m_w*cv_w + m_l*cv_l + m_v*cv_v)
-            #                      + dm_v * (u_v - u_l)
+            #  dm_o * (u_l - h_l) = dT * (m_w*cv_w + m_l*cv_l + m_v*cv_v)
+            #                     + dm_v * (u_v - u_l)
             # let: Cv = m_w*cv_w + m_l*cv_l + m_v*cv_v
-            #  dminj * (u_l - h_l) = dT * Cv + dm_v * (u_v - u_l)
-            #  dT * Cv = dminj * (u_l - h_l) + dm_v * (u_l - u_v)
+            #  dm_o * (u_l - h_l) = dT * Cv + dm_v * (u_v - u_l)
+            #  dT * Cv = dm_o * (u_l - h_l) + dm_v * (u_l - u_v)
             # i think conceptually this makes sense as:
             #  internal energy change = boundary work + phase change energy
             # which checks out, so: bitta simul lets substitute
-            #  dT * Cv = dminj * (u_l - h_l) + (foo + dT * bar) * (u_l - u_v)
-            #  dT * Cv - dT * bar * (u_l - u_v) = dminj * (u_l - h_l) + foo * (u_l - u_v)
-            #  dT = (dminj * (u_l - h_l) + foo * (u_l - u_v))
+            #  dT * Cv = dm_o * (u_l - h_l) + (foo + dT * bar) * (u_l - u_v)
+            #  dT * Cv - dT * bar * (u_l - u_v) = dm_o * (u_l - h_l) + foo * (u_l - u_v)
+            #  dT = (dm_o * (u_l - h_l) + foo * (u_l - u_v))
             #     / (Cv - bar * (u_l - u_v))
             # dandy.
 
-            rho_l_u = PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
-            rho_v_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
-            drhodT_l_u = (PropsSI("D", "T", T_u + DT, "Q", 0, s.ox_type) - rho_l_u) / DT
-            drhodT_v_u = (PropsSI("D", "T", T_u + DT, "Q", 1, s.ox_type) - rho_v_u) / DT
+            rho_l = ox.prop("D", "T", T_t, "Q", 0)
+            rho_v = ox.prop("D", "T", T_t, "Q", 1)
+            drhodT_l = (ox.prop("D", "T", T_t + DT, "Q", 0) - rho_l) / DT
+            drhodT_v = (ox.prop("D", "T", T_t + DT, "Q", 1) - rho_v) / DT
 
-            Cv_l_u = m_l_u * PropsSI("O", "T", T_u, "Q", 0, s.ox_type)
-            Cv_v_u = m_v_u * PropsSI("O", "T", T_u, "Q", 1, s.ox_type)
-            Cv_u = Cv_l_u + Cv_v_u + Cwall
+            Cv_l = m_l * ox.prop("O", "T", T_t, "Q", 0)
+            Cv_v = m_v * ox.prop("O", "T", T_t, "Q", 1)
+            Cv = Cv_l + Cv_v + C_w
 
-            u_l_u = PropsSI("U", "T", T_u, "Q", 0, s.ox_type)
-            u_v_u = PropsSI("U", "T", T_u, "Q", 1, s.ox_type)
-            h_l_u = PropsSI("H", "T", T_u, "Q", 0, s.ox_type)
+            u_l = ox.prop("U", "T", T_t, "Q", 0)
+            u_v = ox.prop("U", "T", T_t, "Q", 1)
+            h_l = ox.prop("H", "T", T_t, "Q", 0)
 
-            foo = dminj / rho_l_u / (1/rho_v_u - 1/rho_l_u)
-            bar = (m_l_u * drhodT_l_u / rho_l_u**2
-                 + m_v_u * drhodT_v_u / rho_v_u**2) \
-                / (1/rho_v_u - 1/rho_l_u)
+            foo = dm_o / rho_l / (1/rho_v - 1/rho_l)
+            bar = (m_l * drhodT_l / rho_l**2
+                 + m_v * drhodT_v / rho_v**2) \
+                / (1/rho_v - 1/rho_l)
 
-            dT_u = (dminj * (u_l_u - h_l_u) + foo * (u_l_u - u_v_u)) \
-                 / (Cv_u - bar * (u_l_u - u_v_u))
+            dT_t = (dm_o * (u_l - h_l) + foo * (u_l - u_v)) \
+                 / (Cv - bar * (u_l - u_v))
 
-            dm_v_u = foo + dT_u * bar
-            dm_l_u = -dminj - dm_v_u
+            dm_v = foo + dT_t * bar
+            dm_l = -dm_o - dm_v
 
-
-
-            # TODO: sim cc
-            dP_d = 0.0
-
-
-            # Debug me:
-            V_l_u = m_l_u / PropsSI("D", "T", T_u, "Q", 0, s.ox_type)
-            V_v_u = m_v_u / PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
-            debugme["V_l_u"] = V_l_u
-            debugme["V_v_u"] = V_v_u
-            debugme["propV_u"] = (V_l_u + V_v_u) / V_u
 
         # Otherwise vapour draining.
-        elif m_v_u > negligible_mass:
-            dm_l_u = 0.0 # liquid mass is ignored hence fourth (big word init).
+        elif m_v > negligible_mass:
+            dm_l = 0.0 # liquid mass is ignored hence fourth (big word init).
 
             # During this period, temperature and density are used to fully
             # define the state (density is simple due to fixed volume).
-            rho_u = m_v_u / V_u
+            rho_v = m_v / V_t
 
             # Due to numerical inaccuracy, might technically have the properties
             # of a saturated mixture so just pretend its a saturated vapour.
-            rhosat_u = PropsSI("D", "T", T_u, "Q", 1, s.ox_type)
-            if rho_u >= rhosat_u:
-                rho_u = rhosat_u
-
-            # Now can get pressure.
-            P_u = PropsSI("P", "T", T_u, "D", rho_u, s.ox_type)
+            rhosat_v = ox.prop("D", "T", T_t, "Q", 1)
+            if rho_v >= rhosat_v:
+                rho_v = rhosat_v
 
 
             # Find injector flow rate.
 
-            if P_u / P_d <= Pr_cutoff:
+            P_u = ox.prop("P", "T", T_t, "D", rho_v)
+            P_d = P_c
+
+            if P_u / P_d <= 1:
                 raise Exception("injector pressure ratio too small")
 
             # Technically gamma but use 'y' for file size reduction.
-            y_u = PropsSI("C", "T", T_u, "D", rho_u, s.ox_type) \
-                / PropsSI("O", "T", T_u, "D", rho_u, s.ox_type)
+            y_u = ox.prop("C", "T", T_t, "D", rho_v) \
+                / ox.prop("O", "T", T_t, "D", rho_v)
             # Use compressibility factor to account for non-ideal gas.
-            Z_u = PropsSI("Z", "T", T_u, "D", rho_u, s.ox_type)
+            Z_u = ox.prop("Z", "T", T_t, "D", rho_v)
 
             # General compressible flow through an injector, with both
             # choked and unchoked possibilities:
@@ -590,69 +653,84 @@ def simulate_burn(s):
             else: # unchoked.
                 Pterm = Pr_rec ** (2 / y_u) - Pr_rec ** ((y_u + 1) / y_u)
                 Pterm *= 2 / (y_u - 1)
-            dminj = Cd * Ainj * P_u * np.sqrt(y_u / Z_u / Rspecific_u / T_u * Pterm)
+            dm_o = Cd_inj * A_inj * P_u * np.sqrt(y_u / Z_u / Rox / T_t * Pterm)
 
             # Mass only leaves through injector, and no state change.
-            dm_v_u = -dminj
+            dm_v = -dm_o
 
 
             # Back to the well.
-            #  d/dt (U) = -dminj * h  [first law of thermodynamics, adiabatic]
-            #  d/dt (U_w + U) = -dminj * h  [no suffix is the non-saturated vapour in the tank]
-            #  d/dt (m_w*u_w) + d/dt (m*u) = -dminj * h
-            #  -dminj * h = dm_w*u_w + m_w*du_w
-            #             + dm*u + m*du
+            #  d/dt (U) = -dm_o * h  [first law of thermodynamics, adiabatic]
+            #  d/dt (U_w + U) = -dm_o * h  [no suffix is the non-saturated vapour in the tank]
+            #  d/dt (m_w*u_w) + d/dt (m*u) = -dm_o * h
+            #  -dm_o * h = dm_w*u_w + m_w*du_w
+            #            + dm*u + m*du
             # dm_w = 0  [wall aint going anywhere]
-            # dm = -dminj  [only mass change is from injector]
-            #  -dminj * h = m_w * du_w
-            #             - dminj * u
-            #             + m * du
-            #  dminj * (u - h) = m_w * du_w + m * du
+            # dm = -dm_o  [only mass change is from injector]
+            #  -dm_o * h = m_w * du_w
+            #            - dm_o * u
+            #            + m * du
+            #  dm_o * (u - h) = m_w * du_w + m * du
             # du = dT * cv  [previously derived]
-            #  dminj * (u - h) = dT * (m_w * cv_w + m * cv)
+            #  dm_o * (u - h) = dT * (m_w * cv_w + m * cv)
             # let: Cv = m_w * cv_w + m * cv
-            #  dminj * (u - h) = dT * Cv
-            # => dT = dminj * (u - h) / Cv
+            #  dm_o * (u - h) = dT * Cv
+            # => dT = dm_o * (u - h) / Cv
             # which makes sense, since only energy change is due to lost flow work.
 
-            u_u = PropsSI("U", "T", T_u, "D", rho_u, s.ox_type)
-            h_u = PropsSI("H", "T", T_u, "D", rho_u, s.ox_type)
+            u_u = ox.prop("U", "T", T_t, "D", rho_v)
+            h_u = ox.prop("H", "T", T_t, "D", rho_v)
 
-            Cv = Cwall + m_v_u * PropsSI("O", "T", T_u, "D", rho_u, s.ox_type)
+            Cv = C_w + m_v * ox.prop("O", "T", T_t, "D", rho_v)
 
-            dT_u = dminj * (u_u - h_u) / Cv
-
-
-
-            # TODO: sim cc
-            dP_d = 0.0
+            dT_t = dm_o * (u_u - h_u) / Cv
 
 
-
-            # Still debug volume justin caseme.
-            debugme["V_l_u"] = 0.0
-            debugme["V_v_u"] = V_u
-            debugme["propV_u"] = 1.0
-
+        # No oxidiser left, and nothing happens without oxidiser flow.
         else:
-            # huh.
-            raise Exception("no mass left")
-            dm_l_u = dm_v_u = dT_u = dP_u = dP_d = 0.0
-
-            debugme["V_l_u"] = 0.0
-            debugme["V_v_u"] = 0.0
-            debugme["propV_u"] = 1.0
+            raise Exception("no ox left")
 
 
-        return dm_l_u, dm_v_u, dT_u, dP_d
+        # Properties determined by fuel regression.
+        dD_f = 0.0
+
+        # Gotta be fuel left.
+        m_f = rho_f * np.pi/4 * (OD_f**2 - D_f**2)
+        if m_f > negligible_mass:
+
+            # Do fuel regression calcs.
+
+            # Get oxidiser mass flux through the fuel grain.
+            Gox = dm_o * 4 / np.pi / D_f**2
+            # Find regression rate from empirical parameters (and ox mass flux).
+            rr_rdot = rr_a0 * Gox**rr_n
+
+            # Fuel mass and diameter change from rdot:
+            dD_f = 2 * rr_rdot
+            dm_f = rr_rdot * rho_f * np.pi * D_f * L_f
+
+
+            # Oxidiser-fuel ratio.
+            ofr = dm_o / dm_f
+
+
+        # Properties determined by combustion dynamics.
+        dP_c = 0.0
+        if dm_o != 0 and dm_f != 0:
+            # TODO: cc pressure
+            pass
+
+
+        return dm_l, dm_v, dT_t, dP_c, dD_f
 
 
     try:
         state = [
-            [m0_l_u],
-            [m0_v_u],
-            [T0_u],
-            [P0_d],
+            [m0_l],
+            [m0_v],
+            [T0_t],
+            [P0_c],
+            [D0_f],
         ]
         # Simulate just for some time, TODO: figure out what is
         # considered the termination of the burn.
@@ -676,57 +754,67 @@ def simulate_burn(s):
     print(f"Finished burn sim in {time.time() - _start_time:.2f}s")
 
 
-    m_l_u, m_v_u, T_u, P_d = state
-    m_l_u = np.array(m_l_u)
-    m_v_u = np.array(m_v_u)
-    T_u = np.array(T_u)
-    P_d = np.array(P_d)
+    m_l, m_v, T_t, P_c, D_f = state
+    m_l = np.array(m_l)
+    m_v = np.array(m_v)
+    T_t = np.array(T_t)
+    P_c = np.array(P_c)
+    D_f = np.array(D_f)
+
+    def diffarr(x):
+        if len(x) == 1:
+            return np.array([0.0])
+        Dx = np.diff(x)
+        Dx = np.append(Dx, Dx[-1])
+        return Dx
+
 
     # Reconstruct pressure over time.
-    P_u = np.zeros(len(T_u), dtype=float)
-    try:
-        # saturated pressure:
-        Pmask = (m_l_u > negligible_mass)
-        Psat = [PropsSI("P", "T", T, "Q", 0, s.ox_type) for T in T_u[Pmask]]
-        P_u[Pmask] = Psat
-        # not:
-        Pmask = ~Pmask & (m_v_u > negligible_mass)
-        Pnot = [PropsSI("P", "T", T, "D", m / V_u, s.ox_type) for T, m in zip(T_u[Pmask], m_v_u[Pmask])]
-        P_u[Pmask] = Pnot
-    except Exception:
-        pass
+    P_t = np.zeros(len(T_t), dtype=float)
+    # saturated pressure:
+    Pmask = (m_l > negligible_mass)
+    Psat = [ox.prop("P", "T", T, "Q", 0) for T in T_t[Pmask]]
+    P_t[Pmask] = Psat
+    # not:
+    Pmask = ~Pmask & (m_v > negligible_mass)
+    Pnot = [ox.prop("P", "T", T, "D", m / V_t) for T, m in zip(T_t[Pmask], m_v[Pmask])]
+    P_t[Pmask] = Pnot
 
+    # Reconstruct fuel mass over time.
+    m_f = rho_f * L_f * np.pi / 4 * (OD_f**2 - D_f**2)
 
-    s.burn_time = (len(m_l_u) - 1) * Dt
-    t = np.linspace(0, s.burn_time, len(m_l_u))
+    # Reconstruct ofr over time.
+    Dm_o = diffarr(m_l + m_v)
+    Dm_f = diffarr(m_f)
+    ofr = np.zeros(len(T_t), dtype=float)
+    ofr[Dm_f != 0] = Dm_o[Dm_f != 0] / Dm_f[Dm_f != 0]
+    ofr[~(Dm_f != 0)] = 0.0
+
+    s.burn_time = (len(m_l) - 1) * Dt
+    t = np.linspace(0, s.burn_time, len(m_l))
     mask = np.ones(len(t), dtype=bool)
     # mask = (np.arange(len(t)) >= int(0.85 * len(t)))
 
-    s.tank_pressure = P_u
-    s.cc_pressure = P_d
-    s.tank_temperature = T_u
-    s.ox_mass_liquid = m_l_u
-    s.ox_mass_vapour = m_v_u
-    s.ox_mass = s.ox_mass_liquid + s.ox_mass_vapour
-    if len(s.ox_mass) == 1:
-        dminj = np.array([0.0])
-    else:
-        dminj = np.diff(s.ox_mass)
-        dminj = np.append(dminj, dminj[-1])
-    s.injector_mass_flow_rate = -dminj / Dt
-
-    qual = s.ox_mass_vapour / s.ox_mass
-    qual[~(s.ox_mass_liquid > negligible_mass)] = 1.0
+    s.ox_mass_liquid = m_l
+    s.ox_mass_vapour = m_v
+    s.ox_mass = m_l + m_v
+    s.fuel_mass = m_f
+    s.tank_temperature = T_t
+    s.tank_pressure = P_t
+    s.cc_pressure = P_c
 
     plotme = [
-        (s.tank_pressure, "Tank pressure", "Pressure [Pa]"),
-        (s.cc_pressure, "CC pressure", "Pressure [Pa]"),
-        (s.tank_temperature - 273.15, "Tank temperature", "Temperature [dC]"),
-        (s.injector_mass_flow_rate, "Injector mass flow rate", "Mass flow rate [kg/s]"),
-        (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]"),
-        (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]"),
-        (qual, "Tank quality", "Mass [kg]"),
-        (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]"),
+        # data, title, ylabel, y_lower_limit_as_zero
+        (s.tank_pressure, "Tank pressure", "Pressure [Pa]", False),
+        (s.cc_pressure, "CC pressure", "Pressure [Pa]", False),
+        (s.tank_temperature - 273.15, "Tank temperature", "Temperature [dC]", False),
+        (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
+        (-Dm_o / Dt, "Ox exit mass flow rate", "Mass flow rate [kg/s]", True),
+        (-Dm_f / Dt, "Fuel exit mass flow rate", "Mass flow rate [kg/s]", True),
+        (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]", True),
+        (s.fuel_mass, "Fuel mass", "Mass [kg]", True),
+        (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]", True),
+        (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]", True),
     ]
     def doplot(plotme):
         plt.figure()
@@ -735,7 +823,7 @@ def simulate_burn(s):
         for i, elem in enumerate(plotme):
             if elem is ...:
                 continue
-            y, title, ylabel = elem
+            y, title, ylabel, snapzero = elem
             plt.subplot(ynum, xnum, 1 + i // ynum + xnum * (i % ynum))
             if not isinstance(y, np.ndarray):
                 y = np.array(y)
@@ -753,10 +841,13 @@ def simulate_burn(s):
             plt.xlabel("Time [s]")
             plt.ylabel(ylabel)
             plt.grid()
+            if snapzero:
+                _, ymax = plt.ylim()
+                plt.ylim(0, ymax)
         plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)
     doplot(plotme)
     if plot_debugme:
-        doplot([(v[0], k, v[1]) for k, v in debugme.state.items()])
+        doplot([(v[0], k, v[1], False) for k, v in debugme.state.items()])
     plt.show()
 
 
@@ -777,8 +868,8 @@ def cost(s):
             raise ValueError("expected all independants set, got unset: "
                     f"sys[{repr(name)}]")
 
-    assert s.ox_type == "N2O"
-    assert s.fuel_type == "PARAFFIN"
+    assert s.ox_type is N2O
+    assert s.fuel_type is PARAFFIN
 
 
     # Firstly get the easy masses/coms/length out of the way.
@@ -790,7 +881,7 @@ def cost(s):
 
 
     # Find worst-case initial saturated tank pressure, which is the max tank pressure.
-    tank_max_pressure = PropsSI("P", "T", s.tank_worstcase_temperature, "Q", 0, s.ox_type)
+    tank_max_pressure = s.ox_type.prop("P", "T", s.tank_worstcase_temperature, "Q", 0)
     # Determine tank specs from the max pressure.
     tank_wall_cyl = Cylinder.pipe(s.tank_inner_length, outer_diameter=s.rocket_diameter)
     tank_wall_cyl.set_thickness_for_stress(tank_max_pressure,
@@ -827,12 +918,7 @@ def cost(s):
     s.cc_wall_mass = cc_wall_cyl.mass(s.cc_wall_density)
     s.cc_wall_com = cc_wall_cyl.com(top)
 
-    s.fuel_density = 900 # paraffin wax density.
     s.fuel_com = top + s.cc_pre_length + s.fuel_length / 2
-    fuel_cyl = Cylinder.pipe(s.fuel_length, outer_diameter=s.cc_diameter)
-    fuel_cyl.thickness = s.fuel_thickness
-    s.fuel_initial_mass = fuel_cyl.mass(s.fuel_density)
-    s.fuel_mass = np.linspace(s.fuel_initial_mass, 0, len(s.ox_mass))
     top += s.cc_length
 
     # TODO: nozzle specs
@@ -870,49 +956,56 @@ def cost(s):
 
 
 
-sys = Sys()
+def main():
+    sys = Sys()
 
-sys.locked_mass = 5.0 # [kg]
-sys.locked_length = 2.0 # [m]
-sys.locked_local_com = 1.3 # downwards from top, [m]
+    sys.locked_mass = 5.0 # [kg]
+    sys.locked_length = 2.0 # [m]
+    sys.locked_local_com = 1.3 # downwards from top, [m]
 
-sys.tank_inner_length = 0.55 # [m], OUTPUT
-sys.tank_wall_density = 2720.0 # Al6061, [kg/m^3]
-sys.tank_wall_yield_strength = 241e6 # Al6061, [Pa]
-sys.tank_wall_specific_heat_capacity = 896 # Al6061, [J/kg/K]
+    sys.tank_inner_length = 0.55 # [m], OUTPUT
+    sys.tank_wall_density = 2720.0 # Al6061, [kg/m^3]
+    sys.tank_wall_yield_strength = 241e6 # Al6061, [Pa]
+    sys.tank_wall_specific_heat_capacity = 896 # Al6061, [J/kg/K]
 
-sys.ox_type = "N2O" # required
-sys.ox_volume_fill_frac = 0.8 # [-]
+    sys.ox_type = N2O # required
+    sys.ox_volume_fill_frac = 0.8 # [-]
 
-sys.mov_mass = 0.5 # [kg]
-sys.mov_length = 0.1 # [m]
-sys.mov_local_com = sys.mov_length / 2 # [m]
+    sys.mov_mass = 0.5 # [kg]
+    sys.mov_length = 0.1 # [m]
+    sys.mov_local_com = sys.mov_length / 2 # [m]
 
-sys.injector_mass = 0.5 # [kg]
-sys.injector_length = 0.02 # [m]
-sys.injector_local_com = sys.injector_length / 2 # [m]
-sys.injector_discharge_coeff = 0.9 # [-]
-sys.injector_orifice_area = 40 * np.pi/4 * 0.5e-3**2 # [m^2], OUTPUT
-sys.injector_initial_pressure_ratio = 0.5 # [-]
+    sys.injector_mass = 0.5 # [kg]
+    sys.injector_length = 0.02 # [m]
+    sys.injector_local_com = sys.injector_length / 2 # [m]
+    sys.injector_discharge_coeff = 0.9 # [-]
+    sys.injector_orifice_area = 40 * np.pi/4 * 0.5e-3**2 # [m^2], OUTPUT
+    sys.injector_initial_pressure_ratio = 0.3 # [-]
 
-sys.cc_diameter = 0.060 # [m], OUTPUT
-sys.cc_wall_density = 2720.0 # Al6061, [kg/m^3]
-sys.cc_wall_yield_strength = 241e6 # Al6061, [Pa]
+    sys.cc_diameter = 0.100 # [m], OUTPUT
+    sys.cc_wall_density = 2720.0 # Al6061, [kg/m^3]
+    sys.cc_wall_yield_strength = 241e6 # Al6061, [Pa]
 
-sys.fuel_type = "PARAFFIN" # required.
-sys.fuel_length = 0.2 # [m], OUTPUT
-sys.fuel_thickness = 0.017 # [m], OUTPUT
+    sys.fuel_type = PARAFFIN # required.
+    sys.fuel_length = 0.15 # [m], OUTPUT
+    sys.fuel_initial_thickness = 0.03 # [m], OUTPUT
 
-sys.nozzle_exit_area = 0.01 # [m^2], OUTPUT
-sys.nozzle_thrust_efficiency = 0.9 # [-]
+    sys.nozzle_exit_area = 0.01 # [m^2], OUTPUT
+    sys.nozzle_thrust_efficiency = 0.9 # [-]
 
-sys.rocket_target_apogee = 30000 / 3.281 # [m]
-sys.rocket_diameter = 0.145 # [m]
-sys.rocket_stability = 1.5 # [-?]
+    sys.rocket_target_apogee = 30000 / 3.281 # [m]
+    sys.rocket_diameter = 0.145 # [m]
+    sys.rocket_stability = 1.5 # [-?]
 
-sys.environment_temperature = 25 + 273.15 # [K]
-sys.injector_pressure_ratio_cutoff = 1.0 # [-]
-sys.tank_worstcase_temperature = 35 + 273.15 # 36.4dC is critical temp of N2O, [K]
-sys.integration_dt = 0.02 # [-]
+    sys.ambient_temperature = 25 + 273.15 # [K]
+    sys.ambient_pressure = 100e3 # [Pa]
+    sys.tank_worstcase_temperature = 35 + 273.15 # 36.4dC is critical temp of N2O, [K]
+    # Regression rate data for paraffin and n2o, from:
+    # Hybrid Rocket Propulsion Handbook, Karp & Jens.
+    sys.regression_rate_coeff = 1.55e-4
+    sys.regression_rate_exp = 0.5
 
-cost(sys)
+    cost(sys)
+
+if __name__ == "__main__":
+    main()
