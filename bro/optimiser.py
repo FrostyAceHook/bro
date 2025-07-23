@@ -1,5 +1,6 @@
 import traceback
 import time
+from math import pi
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -126,6 +127,9 @@ class FuOx:
         self.a0 = a0
         self.n = n
 
+    def __repr__(self):
+        return f"<FuOx: {self.fuel.name}+{self.ox.name}>"
+
 
 # Compositions and enthalpy of formation from Hybrid Rocket Propulsion Handbook, Karp & Jens.
 PARAFFIN = Fuel("PARAFFIN", "C 32 H 66", hf=-224.2, rho=924.5)
@@ -149,15 +153,36 @@ class OUTPUT:
 @frozen
 class Sys:
     def __init__(s):
-        # All dependant variables initially set to ellipsis. Note that the
-        # choice of "basis" variables (the independant variables that are
-        # either input or output) is arbitrary, but some make significantly
-        # more sense than others (i.e. the relationship is difficult to
-        # inverse). Also note that the decision between assigning an
-        # independant variable as input and output is generally arbitrary
-        # (so long as controlled by us and not the weather or contest for
-        # example), and the only real difference is that output variables
-        # are swept over a range and the optimal choice is kept.
+        r"""
+Cheeky rocket ascii:
+
+   .     .
+   :     : ----- locked (by rest of team)
+   |     |
+   | ___ | _________ origin line (coms measured from here, +ve down)
+   ||   ||
+   ||   || ----- tank (contains oxidiser)
+   ||___||
+   |  X  | ----- mov (main oxidiser valve)
+   | _#_ | ----- injector
+   ||, ,||
+   ||| ||| ----- cc (combustion chamber, contains fuel grain)
+  /||' '||\
+ / | \ / | \
+/  |_/ \_|  \
+|_/   |   \_| -- fins
+      |
+      '---------  nozzle
+
+All dependant variables initially set to ellipsis. Note that the choice
+of "basis" variables (the independant variables that are either input
+or output) is arbitrary, but some make significantly more sense than
+others (i.e. the relationship is difficult to inverse). Also note that
+the decision between assigning an independant variable as input and
+output is generally arbitrary (so long as controlled by us and not the
+weather or contest for example), and the only real difference is that
+output variables are swept over a range and the optimal choice is kept.
+        """
 
         s.target_apogee = INPUT # [m]
         s.fuox = INPUT # must be `PARAFFIN_N2O`
@@ -354,7 +379,7 @@ class Cylinder:
             raise ValueError("unconstrained outer diameter")
         b = self.outer_diameter
         a = self.inner_diameter
-        return self.length * np.pi/4 * (b**2 - a**2)
+        return self.length * pi/4 * (b**2 - a**2)
 
     def surface_area(self, cutoff=None):
         if self.inner_diameter is None:
@@ -367,9 +392,9 @@ class Cylinder:
             cutoff = 0.0
         if cutoff > 1.0:
             cutoff = 1.0
-        inner = cutoff * self.length * np.pi * self.inner_diameter
-        outer = cutoff * self.length * np.pi * self.outer_diameter
-        end = np.pi/4 * (self.outer_diameter**2 - self.inner_diameter**2)
+        inner = cutoff * self.length * pi * self.inner_diameter
+        outer = cutoff * self.length * pi * self.outer_diameter
+        end = pi/4 * (self.outer_diameter**2 - self.inner_diameter**2)
         if cutoff == 0.0:
             end = 0.0
         if cutoff == 1.0:
@@ -530,7 +555,7 @@ def simulate_burn(s):
     D0_f = fuel_cyl.inner_diameter
 
     # Combustion chamber initially filled with ambient properties.
-    V0_c = Vempty_c - L_f * np.pi/4 * (D_c**2 - D0_f**2)
+    V0_c = Vempty_c - L_f * pi/4 * (D_c**2 - D0_f**2)
     m0_g = rho_a * V0_c
     nmol0_g = m0_g / Mw_a
     T0_g = T_a
@@ -542,8 +567,8 @@ def simulate_burn(s):
         """
 
         # Reconstruct some cc/fuel state.
-        V_f = L_f * np.pi/4 * (D_c**2 - D_f**2)
-        A_f = L_f * np.pi * D_f # inner fuel grain surface area.
+        V_f = L_f * pi/4 * (D_c**2 - D_f**2)
+        A_f = L_f * pi * D_f # inner fuel grain surface area.
         V_c = Vempty_c - V_f
         m_f = rho_f * V_f
 
@@ -791,7 +816,7 @@ def simulate_burn(s):
         if m_f > negligible_mass: # Gotta be fuel left.
 
             # Get oxidiser mass flux through the fuel grain.
-            Gox = dm_inj * 4 / np.pi / D_f**2
+            Gox = dm_inj * 4 / pi / D_f**2
             # Find regression rate from empirical parameters (and ox mass flux).
             rr_rdot = rr_a0 * Gox**rr_n
 
@@ -944,7 +969,7 @@ def simulate_burn(s):
 
     # Reconstruct a bunch of dependant state.
 
-    V_f = L_f * np.pi / 4 * (D_c**2 - D_f**2)
+    V_f = L_f * pi / 4 * (D_c**2 - D_f**2)
     V_c = Vempty_c - V_f
 
     m_f = rho_f * V_f
@@ -1161,59 +1186,3 @@ def cost(s):
     simulate_trajectory(s)
 
     print(s)
-
-
-
-def main():
-    sys = Sys()
-
-    sys.target_apogee = 30000 / 3.281 # [m]
-    sys.fuox = PARAFFIN_N2O # required.
-
-    sys.locked_mass = 5.0 # [kg]
-    sys.locked_length = 2.0 # [m]
-    sys.locked_local_com = 1.3 # downwards from top, [m]
-
-    sys.tank_inner_length = 0.55 # [m], OUTPUT
-    sys.tank_wall_density = 2720.0 # Al6061, [kg/m^3]
-    sys.tank_wall_yield_strength = 241e6 # Al6061, [Pa]
-    sys.tank_wall_specific_heat_capacity = 896 # Al6061, [J/kg/K]
-
-    sys.ox_volume_fill_frac = 0.8 # [-]
-    sys.ox_worstcase_temperature = 35 + 273.15 # 36.4dC is critical temp of N2O, [K]
-
-    sys.mov_mass = 0.5 # [kg]
-    sys.mov_length = 0.1 # [m]
-    sys.mov_local_com = sys.mov_length / 2 # [m]
-
-    sys.injector_mass = 0.5 # [kg]
-    sys.injector_length = 0.02 # [m]
-    sys.injector_local_com = sys.injector_length / 2 # [m]
-    sys.injector_discharge_coeff = 0.9 # [-]
-    sys.injector_orifice_area = 40 * np.pi/4 * 0.5e-3**2 # [m^2], OUTPUT
-
-    sys.cc_diameter = 0.100 # [m], OUTPUT
-    sys.cc_combustion_efficiency = 1.0 # [-]
-    sys.cc_wall_density = 2720.0 # Al6061, [kg/m^3]
-    sys.cc_wall_yield_strength = 241e6 # Al6061, [Pa]
-
-    sys.fuel_length = 0.25 # [m], OUTPUT
-    sys.fuel_initial_thickness = 0.02 # [m], OUTPUT
-
-    sys.nozzle_throat_area = np.pi * 0.015**2 # [m^2]
-    sys.nozzle_discharge_coeff = 1.0 # [-]
-    sys.nozzle_thrust_efficiency = 0.9 # [-]
-
-    sys.rocket_diameter = 0.145 # [m]
-    sys.rocket_stability = 1.5 # [-?]
-
-    sys.ambient_temperature = 25 + 273.15 # [K]
-    sys.ambient_pressure = 101.325e3 # [Pa]
-    sys.ambient_density = 1.293 # [kg/m^3]
-    sys.ambient_molar_mass = 28.9647e-3 # [kg/mol]
-    sys.ambient_constant_pressure_specific_heat_capacity = 1005.0 # [J/kg/K]
-
-    cost(sys)
-
-if __name__ == "__main__":
-    main()
