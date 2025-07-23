@@ -3,10 +3,11 @@ Helpers to create function approximations.
 """
 
 import itertools
-import numpy as np
 import math
+
 import matplotlib.pyplot as plt
-from scipy.optimize import least_squares
+import numpy as np
+import scipy
 
 
 def num_coeffs(dims, degree):
@@ -33,16 +34,38 @@ def yup_all_ones(degree, *coords):
             terms.append(term)
     return np.stack(terms).T
 
+def poly_ordering(dims, degree):
+    """
+    returns a list of strings of each term.
+    """
+    if dims > 3:
+        raise ValueError("havent thought that far ahead")
+    coords = "xyz"[:dims]
+    terms = []
+    def tostr(c, e):
+        if e == 0:
+            return ""
+        if e == 1:
+            return c
+        return f"{c}^{e}"
+    for sumdeg in range(degree + 1):
+        for exps in itertools.product(range(sumdeg + 1), repeat=dims):
+            exps = exps[::-1]
+            if sum(exps) != sumdeg:
+                continue
+            term = " ".join(tostr(c, e) for c, e in zip(coords, exps))
+            terms.append(term)
+    terms = [t or "1" for t in terms]
+    return terms
+
 
 class RationalPolynomial:
     def __init__(self, dims, n, m):
-        self.pcount = num_coeffs(dims, n)
-        self.qcount = num_coeffs(dims, m)
         self.dims = dims
         self.n = n
         self.m = m
-        self.pones = None
-        self.qones = None
+        self.pcount = num_coeffs(dims, n)
+        self.qcount = num_coeffs(dims, m)
 
     def initial_coeffs(self):
         # Start with 1 / 1.
@@ -60,6 +83,11 @@ class RationalPolynomial:
             raise ValueError(f"expected {self.pcount + self.qcount} "
                     f"vals, got {len(new_coeffs)}")
         self._coeffs = new_coeffs
+
+    def ones(self, *flatcoords):
+        pones = yup_all_ones(self.n, *flatcoords)
+        qones = yup_all_ones(self.m, *flatcoords)
+        return pones, qones
 
     def cook(self, pones, qones, *, coeffs=None):
         if coeffs is None:
@@ -81,95 +109,106 @@ class RationalPolynomial:
         Q = ", ".join(f"{x:.5g}" for x in qc)
         return f"({P}) / ({Q})"
 
+    @classmethod
+    def of(cls, func, *coords, n=3, m=3, vectorised=False):
+        flatcoords = [x.ravel() for x in coords]
+        if not vectorised:
+            func = np.vectorize(func)
+        dims = len(coords)
 
-def approximate(func, *coords, n=3, m=3, vectorised=False):
-    flatcoords = [x.ravel() for x in coords]
-    if not vectorised:
-        func = np.vectorise(func)
-    dims = len(coords)
+        ratpoly = cls(dims=dims, n=n, m=m)
+        pones, qones = ratpoly.ones(*flatcoords)
+        real = func(*flatcoords)
+        def diff(coeffs):
+            dif = ratpoly.cook(pones, qones, coeffs=coeffs) - real
+            return dif
+        def maxprop(coeffs):
+            dif = ratpoly.cook(pones, qones, coeffs=coeffs) - real
+            return np.max(np.abs(dif / real))
 
-    ratpoly = RationalPolynomial(dims=dims, n=n, m=m)
-    pones = yup_all_ones(n, *flatcoords)
-    qones = yup_all_ones(m, *flatcoords)
-    real = func(*flatcoords)
-    def loss(coeffs):
-        return ratpoly.cook(pones, qones, coeffs=coeffs) - real
+        # Find the best set of coefficients.
+        coeffs = ratpoly.initial_coeffs()
+        # Initially least squares (since its much more stable).
+        res = scipy.optimize.least_squares(diff, coeffs)
+        coeffs = res.x
+        # Then minimise max error.
+        res = scipy.optimize.minimize(maxprop, coeffs)
+        coeffs = res.x
 
-    # Find the best set of coefficients.
-    res = least_squares(loss, ratpoly.initial_coeffs())
-    ratpoly.coeffs = res.x
+        ratpoly.coeffs = coeffs
+        return ratpoly
 
-    return ratpoly
 
-def havealook(ratpoly, func, *coords, vectorised=False, threed=False):
-    flatcoords = [x.ravel() for x in coords]
-    if not vectorised:
-        func = np.vectorise(func)
-    dims = len(coords)
-    if dims != 1 and dims != 2:
-        raise ValueError(f"huh {dims}")
-    pones = yup_all_ones(ratpoly.n, *flatcoords)
-    qones = yup_all_ones(ratpoly.m, *flatcoords)
-    approx = ratpoly.cook(pones, qones).reshape(coords[0].shape)
-    real = func(*coords)
-    error = 100 * np.abs((approx - real) / real)
+    def havealook(self, func, *coords, vectorised=False, threed=False):
+        flatcoords = [x.ravel() for x in coords]
+        if not vectorised:
+            func = np.vectorize(func)
+        if self.dims != len(coords):
+            raise ValueError(f"expected {self.dims} dims, got {len(coords)}")
+        if self.dims != 1 and self.dims != 2:
+            raise ValueError(f"huh {self.dims}")
+        pones, qones = self.ones(*flatcoords)
+        approx = self.cook(pones, qones).reshape(coords[0].shape)
+        real = func(*coords)
+        error = 100 * np.abs((approx - real) / real)
 
-    if dims == 2 and threed:
-        plotme = [
-            ([
-                (real, "real", ("b", "Blues")),
-                (approx, "approx", ("b", "Oranges")),
-            ], "Approximation [real=blue, approx=orange]"),
-            (error, r"%error"),
-        ]
-    else:
-        plotme = [
-            (real, "Real"),
-            (approx, "Approximation"),
-            (error, r"%error"),
-        ]
-    for data, title in plotme:
-        fig = plt.figure(figsize=(8, 6))
-        ax = fig.add_subplot(111, projection="3d" if threed else None)
-        conts = []
-        if dims == 2:
-            def plotter(z, colour="viridis"):
-                if threed:
-                    ax.plot_surface(*coords, z, cmap=colour,
-                            edgecolor="none", alpha=0.9)
-                else:
-                    cont = ax.contourf(*coords, z, levels=100, cmap=colour)
-                    conts.append(cont)
+        if self.dims == 2 and threed:
+            plotme = [
+                ([
+                    (real, "real", ("b", "Blues")),
+                    (approx, "approx", ("b", "Oranges")),
+                ], "Approximation [real=blue, approx=orange]"),
+                (error, r"%error"),
+            ]
         else:
-            def plotter(y, colour=None):
-                ax.plot(*coords, y, color=colour)
-        if isinstance(data, list):
-            for subdata, label, (twod_col, threed_col) in data:
-                plotter(subdata, threed_col if dims == 2 else twod_col)
-        else:
-            plotter(data)
-        ax.set_title(title)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        if dims == 2:
-            if threed:
-                ax.set_zlabel("Z")
-                ax.view_init(elev=30, azim=135)
+            plotme = [
+                (real, "Real"),
+                (approx, "Approximation"),
+                (error, r"%error"),
+            ]
+        for data, title in plotme:
+            fig = plt.figure(figsize=(8, 6))
+            ax = fig.add_subplot(111, projection="3d" if threed else None)
+            conts = []
+            if self.dims == 2:
+                def plotter(z, colour="viridis"):
+                    if threed:
+                        ax.plot_surface(*coords, z, cmap=colour,
+                                edgecolor="none", alpha=0.9)
+                    else:
+                        cont = ax.contourf(*coords, z, levels=100, cmap=colour)
+                        conts.append(cont)
             else:
-                for cont in conts:
-                    fig.colorbar(cont, ax=ax)
-    plt.tight_layout()
-    plt.show()
+                def plotter(y, colour=None):
+                    ax.plot(*coords, y, color=colour)
+            if isinstance(data, list):
+                for subdata, label, (twod_col, threed_col) in data:
+                    plotter(subdata, threed_col if self.dims == 2 else twod_col)
+            else:
+                plotter(data)
+            ax.set_title(title)
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            if self.dims == 2:
+                if threed:
+                    ax.set_zlabel("Z")
+                    ax.view_init(elev=30, azim=135)
+                else:
+                    for cont in conts:
+                        fig.colorbar(cont, ax=ax)
+        plt.tight_layout()
+        plt.show()
 
+from CoolProp.CoolProp import PropsSI
 
-def real(x, y):
-    return 1 + 100*np.sin(3*x) * np.exp(-y) + y**2
+def real(t):
+    return PropsSI("D", "T", t, "Q", 0, "N2O")
 
 N = 30
-X = np.linspace(2, 4, N)
-Y = np.linspace(4, 6, N)
-X, Y = np.meshgrid(X, Y)
+X = np.linspace(-5 + 273.15, 35 + 273.15, N)
 
-ratpoly = approximate(real, X, Y, n=2, m=2, vectorised=True)
-havealook(ratpoly, real, X, Y, vectorised=True)
+ratpoly = RationalPolynomial.of(real, X, n=3, m=2)
+ratpoly.havealook(real, X)
 print(ratpoly)
+print(poly_ordering(ratpoly.dims, 2))
+print(poly_ordering(ratpoly.dims, 3))
