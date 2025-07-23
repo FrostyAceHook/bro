@@ -8,3 +8,5 @@ Requires:
 - matplotlib
 - coolprop
 - rocketcea
+- setuptools
+- cython

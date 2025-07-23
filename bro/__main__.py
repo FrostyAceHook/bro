@@ -1,8 +1,18 @@
+import os
+import sys
 from math import pi
 
 from . import optimiser
+from . import test
+
 
 def main():
+    # Enable colours.
+    os.system("")
+
+    test.foo()
+    print("okie")
+
     s = optimiser.Sys()
 
     s.target_apogee = 30000 / 3.281 # [m]
@@ -51,7 +61,9 @@ def main():
     s.ambient_molar_mass = 28.9647e-3 # [kg/mol]
     s.ambient_constant_pressure_specific_heat_capacity = 1005.0 # [J/kg/K]
 
+    print("not running optimiser rn, cooking it up in cython first")
+    return 0
     optimiser.cost(s)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

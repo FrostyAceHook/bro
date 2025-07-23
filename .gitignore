@@ -1,0 +1,8 @@
+**/.*
+!.gitignore
+
+**/__pycache__
+
+build/
+bro/**.c
+bro/**.pyd
