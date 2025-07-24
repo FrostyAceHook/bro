@@ -46,16 +46,15 @@ def poly_ordering(dims, degree):
         if e == 0:
             return ""
         if e == 1:
-            return c
-        return f"{c}^{e}"
+            return f"{c}"
+        return f"{c}^{e} "
     for sumdeg in range(degree + 1):
         for exps in itertools.product(range(sumdeg + 1), repeat=dims):
             exps = exps[::-1]
             if sum(exps) != sumdeg:
                 continue
-            term = " ".join(tostr(c, e) for c, e in zip(coords, exps))
-            terms.append(term)
-    terms = [t or "1" for t in terms]
+            term = "".join(tostr(c, e) for c, e in zip(coords, exps))
+            terms.append(term.strip())
     return terms
 
 
@@ -105,12 +104,14 @@ class RationalPolynomial:
     def __repr__(self):
         pc = self.coeffs[:self.pcount]
         qc = self.coeffs[self.pcount:]
-        P = ", ".join(f"{x:.5g}" for x in pc)
-        Q = ", ".join(f"{x:.5g}" for x in qc)
+        P = [f"{x:.5g} {t}".strip() for x, t in zip(pc, poly_ordering(self.dims, self.n))]
+        Q = [f"{x:.5g} {t}".strip() for x, t in zip(qc, poly_ordering(self.dims, self.m))]
+        P = P[0] + "".join(f" {x[0]} {x[1:]}" if x[0]=="-" else f" + {x}" for x in P[1:])
+        Q = Q[0] + "".join(f" {x[0]} {x[1:]}" if x[0]=="-" else f" + {x}" for x in Q[1:])
         return f"({P}) / ({Q})"
 
     @classmethod
-    def of(cls, func, *coords, n=3, m=3, vectorised=False):
+    def approximate(cls, func, *coords, n=3, m=3, vectorised=False):
         flatcoords = [x.ravel() for x in coords]
         if not vectorised:
             func = np.vectorize(func)
@@ -123,8 +124,8 @@ class RationalPolynomial:
             dif = ratpoly.cook(pones, qones, coeffs=coeffs) - real
             return dif
         def maxprop(coeffs):
-            dif = ratpoly.cook(pones, qones, coeffs=coeffs) - real
-            return np.max(np.abs(dif / real))
+            approx = ratpoly.cook(pones, qones, coeffs=coeffs)
+            return np.max(np.abs(approx / real - 1))
 
         # Find the best set of coefficients.
         coeffs = ratpoly.initial_coeffs()
@@ -136,7 +137,33 @@ class RationalPolynomial:
         coeffs = res.x
 
         ratpoly.coeffs = coeffs
-        return ratpoly
+        return ratpoly, maxprop(coeffs)
+
+    @classmethod
+    def of(cls, func, *coords, vectorised=False, max_error=0.01):
+        flatcoords = [x.ravel() for x in coords]
+        if not vectorised:
+            func = np.vectorize(func)
+        dims = len(coords)
+
+        # Go through all n,m pairs.
+        maxsum = 1
+        while True:
+            pairs = []
+            n = 1
+            while n <= maxsum:
+                m = maxsum - n
+                pairs.append((n, m))
+                n += 1
+            def sorter(pair):
+                n, m = pair
+                return abs(n - m), n
+            for n, m in sorted(pairs, key=sorter):
+                ratpoly, maxerr = cls.approximate(func, *coords,
+                        n=n, m=m, vectorised=True)
+                if maxerr <= max_error:
+                    return ratpoly
+            maxsum += 1
 
 
     def havealook(self, func, *coords, vectorised=False, threed=False):
@@ -150,25 +177,18 @@ class RationalPolynomial:
         pones, qones = self.ones(*flatcoords)
         approx = self.cook(pones, qones).reshape(coords[0].shape)
         real = func(*coords)
-        error = 100 * np.abs((approx - real) / real)
+        error = 100 * np.abs(approx / real - 1)
 
-        if self.dims == 2 and threed:
-            plotme = [
-                ([
-                    (real, "real", ("b", "Blues")),
-                    (approx, "approx", ("b", "Oranges")),
-                ], "Approximation [real=blue, approx=orange]"),
-                (error, r"%error"),
-            ]
-        else:
-            plotme = [
-                (real, "Real"),
-                (approx, "Approximation"),
-                (error, r"%error"),
-            ]
-        for data, title in plotme:
-            fig = plt.figure(figsize=(8, 6))
-            ax = fig.add_subplot(111, projection="3d" if threed else None)
+        plotme = [
+            ([
+                (real, "real", ("b", "Blues")),
+                (approx, "approx", ("orange", "Oranges")),
+            ], "Approximation [real=blue, approx=orange]"),
+            (error, "|%error|"),
+        ]
+        fig = plt.figure(figsize=(6 * len(plotme), 6))
+        for i, (data, title) in enumerate(plotme):
+            ax = fig.add_subplot(1, len(plotme), 1 + i, projection="3d" if threed else None)
             conts = []
             if self.dims == 2:
                 def plotter(z, colour="viridis"):
@@ -197,18 +217,22 @@ class RationalPolynomial:
                     for cont in conts:
                         fig.colorbar(cont, ax=ax)
         plt.tight_layout()
-        plt.show()
 
 from CoolProp.CoolProp import PropsSI
 
 def real(t):
-    return PropsSI("D", "T", t, "Q", 0, "N2O")
+    return PropsSI("D", "T", t, "Q", 1, "N2O")
 
-N = 30
+N = 500
 X = np.linspace(-5 + 273.15, 35 + 273.15, N)
 
-ratpoly = RationalPolynomial.of(real, X, n=3, m=2)
+ratpoly = RationalPolynomial.of(real, X, max_error=0.2)
 ratpoly.havealook(real, X)
 print(ratpoly)
-print(poly_ordering(ratpoly.dims, 2))
-print(poly_ordering(ratpoly.dims, 3))
+
+ratpoly = RationalPolynomial.of(real, X, max_error=0.005)
+ratpoly.havealook(real, X)
+print(ratpoly)
+
+
+plt.show()
