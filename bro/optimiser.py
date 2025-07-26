@@ -133,11 +133,11 @@ class FuOx:
 
 # Compositions and enthalpy of formation from Hybrid Rocket Propulsion Handbook, Karp & Jens.
 PARAFFIN = Fuel("PARAFFIN", "C 32 H 66", hf=-224.2, rho=924.5)
-N2O = Oxidiser("N2O", "N 2 O 1", hf=15.5,
+NOX = Oxidiser("N2O", "N 2 O 1", hf=15.5,
                rho=PropsSI("D", "T", Oxidiser.TEMPERATURE, "Q", 0, "N2O"))
 
-# Regression rate data for paraffin and N2O, from Hybrid Rocket Propulsion Handbook, Karp & Jens.
-PARAFFIN_N2O = FuOx(fuel=PARAFFIN, ox=N2O, a0=1.55e-4, n=0.5)
+# Regression rate data for paraffin and NOX, from Hybrid Rocket Propulsion Handbook, Karp & Jens.
+PARAFFIN_NOX = FuOx(fuel=PARAFFIN, ox=NOX, a0=1.55e-4, n=0.5)
 
 
 
@@ -185,7 +185,7 @@ output variables are swept over a range and the optimal choice is kept.
         """
 
         s.target_apogee = INPUT # [m]
-        s.fuox = INPUT # must be `PARAFFIN_N2O`
+        s.fuox = INPUT # must be `PARAFFIN_NOX`
 
         s.locked_mass = INPUT # [kg]
         s.locked_length = INPUT # [m]
@@ -441,7 +441,7 @@ def simulate_burn(s):
     _start_time = time.time()
 
     # Fuel and ox objects.
-    assert s.fuox is PARAFFIN_N2O
+    assert s.fuox is PARAFFIN_NOX
     fuel = s.fuox.fuel
     ox = s.fuox.ox
 
@@ -1088,7 +1088,7 @@ def cost(s):
             raise ValueError("expected all independants set, got unset: "
                     f"sys[{repr(name)}]")
 
-    assert s.fuox is PARAFFIN_N2O
+    assert s.fuox is PARAFFIN_NOX
 
 
     # Firstly get the easy masses/coms/length out of the way.
@@ -1129,7 +1129,7 @@ def cost(s):
     s.cc_length = s.cc_pre_length + s.fuel_length + s.cc_post_length
 
     # TODO: nozzle specs
-    s.nozzle_exit_area = 40 * s.nozzle_throat_area
+    s.nozzle_exit_area = 20 * s.nozzle_throat_area
     s.nozzle_length = 0.10
     s.nozzle_com = top + 0.05
     s.nozzle_mass = 2
