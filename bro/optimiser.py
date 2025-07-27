@@ -8,33 +8,34 @@ import rocketcea
 from CoolProp.CoolProp import PropsSI
 from rocketcea.cea_obj_w_units import CEA_Obj
 
-GAS_CONSTANT = 8.31446261815324 # [J/mol/K]
+from . import sim_burn
+
 
 
 
 def singleton(cls):
     """
-    Returns a single instantiation of the given class, and prevents
-    further creation of the class.
+    Returns a single instantiation of the given class, and prevents further creation of the class.
     - class decorator.
     """
+
     instance = cls()
-    def throw(cls, *args, **kwargs):
-        raise TypeError(f"cannot create another instance of singleton {repr(cls.__name__)}")
     if getattr(instance, "__doc__", None) is None:
         if getattr(cls, "__doc__", None) is not None:
             instance.__doc__ = cls.__doc__
+
+    def throw(cls, *args, **kwargs):
+        raise TypeError(f"cannot create another instance of singleton {repr(cls.__name__)}")
     cls.__new__ = throw
+
     return instance
 
 
 def frozen(cls):
     """
-    Disables creating or deleting new object attributes of the
-    given class (outside the `__init__` method).
+    Disables creating or deleting new object attributes of the given class (outside the `__init__` method).
     - class decorator.
     """
-
     if hasattr(cls, "__slots__"):
         raise ValueError("cannot combine __slots__ and @frozen")
 
@@ -59,7 +60,6 @@ def frozen(cls):
     cls.__setattr__ = __setattr__
     cls.__delattr__ = __delattr__
     return cls
-
 
 
 
@@ -442,8 +442,6 @@ def simulate_burn(s):
 
     # Fuel and ox objects.
     assert s.fuox is PARAFFIN_NOX
-    fuel = s.fuox.fuel
-    ox = s.fuox.ox
 
     # Coupla cylinders.
     fuel_cyl = Cylinder.pipe(s.fuel_length, outer_diameter=s.cc_diameter)
@@ -453,505 +451,70 @@ def simulate_burn(s):
     cc_cyl = Cylinder.solid(s.cc_length, s.cc_diameter)
 
 
-    # legend (shoutout charle):
-    #
-    # X0 = initial
-    # dX = time derivative
-    # DX = discrete change
-    #
-    # X_l = ox liquid
-    # X_v = ox vapour
-    # X_o = ox anywhere
-    # X_f = fuel
-    # X_g = cc gases
-    # X_n = new cc gases
-    #
-    # X_t = tank
-    # X_c = cc
-    # X_w = tank wall (for heat sink)
-    # X_a = ambient
-    #
-    # X_inj = injector
-    # X_u = upstream (tank-side of injector)
-    # X_d = downstream (cc-side of injector)
-    #
-    # X_nzl = nozzle
-    #
-    # X_reg = regression (fuel erosion/vapourisation)
-
-    # Various system constants.
-    Dt = 0.001 # discrete calculus over time.
-    DT = 0.02 # discrete calculus over temperature.
-    negligible_mass = 0.001
-
-    Mw_o = ox.prop("M")
-    R_o = GAS_CONSTANT / Mw_o
-
-    L_f = fuel_cyl.length
-    rho_f = fuel.density
-
-    V_t = tank_cyl.volume()
-
-    D_c = cc_cyl.outer_diameter
-    eta_c = s.cc_combustion_efficiency
-    Vempty_c = cc_cyl.volume()
-
-    c_w = s.tank_wall_specific_heat_capacity # note cp ~= cv for solids.
-    C_w = s.tank_wall_mass * c_w
-
-    T_a = s.ambient_temperature
-    P_a = s.ambient_pressure
-    rho_a = s.ambient_density
-    Mw_a = s.ambient_molar_mass
-    cp_a = s.ambient_constant_pressure_specific_heat_capacity
-
-    Cd_inj = s.injector_discharge_coeff
-    A_inj = s.injector_orifice_area
-
-    Cd_nzl = s.nozzle_discharge_coeff
-    A_nzl = s.nozzle_throat_area
-    eps_nzl = s.nozzle_exit_area / s.nozzle_throat_area
-
-    rr_a0 = s.fuox.a0
-    rr_n = s.fuox.n
-
-
-    # Cea object me.
-    cea = CEA_Obj(propName="", oxName=ox.name, fuelName=fuel.name,
-                  isp_units="sec",
-                  cstar_units="m/s",
-                  pressure_units="Pa",
-                  temperature_units="K",
-                  sonic_velocity_units="m/s",
-                  enthalpy_units="J/kg",
-                  density_units="kg/m^3",
-                  specific_heat_units="J/kg-K")
-
-
-    # Tracked state (all of which changes over time and is described
-    # by differentials) is:
-    # - T_t: tank temperature
-    # - P_c: cc pressure
-    # - D_f: fuel grain inner diameter
-    # - m_l: tank liquid mass (happens to always be saturated)
-    # - m_v: tank vapour mass (only saturated if liquid mass > negligible)
-    # - m_g: cc gas mass
-    # - T_g: cc gas temperature
-    # - nmol_g: cc gas number of moles
-    # - Cp_g: cc gas constant pressure heat capacity
-    # This is enough to fully define the system at all times (when
-    # combined with the constants).
-
-    # Calculate initial state.
-
-    # Assuming ox tank at ambient temperature and a saturated mixture.
-    T0_t = T_a
-    V0_l = V_t * s.ox_volume_fill_frac
-    V0_v = V_t - V0_l
-    m0_l = V0_l * ox.prop("D", "T", T0_t, "Q", 0)
-    m0_v = V0_v * ox.prop("D", "T", T0_t, "Q", 1)
-
-    # Inner diameter starts at full fuel grain.
-    D0_f = fuel_cyl.inner_diameter
-
-    # Combustion chamber initially filled with ambient properties.
-    V0_c = Vempty_c - L_f * pi/4 * (D_c**2 - D0_f**2)
-    m0_g = rho_a * V0_c
-    nmol0_g = m0_g / Mw_a
-    T0_g = T_a
-    Cp0_g = m0_g * cp_a
-
-    def df(T_t, m_l, m_v, D_f, m_g, nmol_g, T_g, Cp_g):
-        """
-        Returns the time derivatives of all input variables.
-        """
-
-        # Reconstruct some cc/fuel state.
-        V_f = L_f * pi/4 * (D_c**2 - D_f**2)
-        A_f = L_f * pi * D_f # inner fuel grain surface area.
-        V_c = Vempty_c - V_f
-        m_f = rho_f * V_f
-
-        # Reconstruct some cc gas state.
-        cp_g = Cp_g / m_g
-        Mw_g = m_g / nmol_g
-        R_g = GAS_CONSTANT / Mw_g
-        y_g = cp_g / (cp_g - R_g)
-        rho_g = m_g / V_c
-
-        # Assuming combustion gases are ideal:
-        #  P*V = m*R*T
-        #  P = R*T * m/V
-        P_c = R_g * T_g * rho_g
-
-
-
-        # Properties determined by injector flow:
-        dm_l = 0.0
-        dm_v = 0.0
-        dm_o = 0.0
-        dT_t = 0.0
-
-        # Liquid draining while there's any liquid in the tank.
-        if m_l > negligible_mass:
-
-            # Find injector flow rate.
-
-            P_u = ox.prop("P", "T", T_t, "Q", 0) # tank at saturated pressure.
-            P_d = P_c
-
-            if P_u <= P_d:
-                raise Exception("no injector pressure ratio")
-
-            # Single-phase incompressible model (with Beta = 0):
-            # (assuming upstream density as the "incompressible" density)
-            rho_u = ox.prop("D", "P", P_u, "Q", 0)
-            mdot_SPI = Cd_inj * A_inj * np.sqrt(2 * rho_u * (P_u - P_d))
-
-            # Homogenous equilibrium model:
-            # (assuming only saturated liquid leaving from upstream)
-            s_u = ox.prop("S", "P", P_u, "Q", 0)
-            s_d_l = ox.prop("S", "P", P_d, "Q", 0)
-            s_d_v = ox.prop("S", "P", P_d, "Q", 1)
-            x_d = (s_u - s_d_l) / (s_d_v - s_d_l)
-            h_u = ox.prop("H", "P", P_u, "Q", 0)
-            h_d = ox.prop("H", "P", P_d, "Q", x_d)
-            rho_d = ox.prop("D", "P", P_d, "Q", x_d)
-            mdot_HEM = Cd_inj * A_inj * rho_d * np.sqrt(2 * (h_u - h_d))
-
-            # Generalised non-homogenous non-equilibrium model:
-            # (assuming that P_sat is upstream saturation, and so is alaways
-            #  =P_u since its saturated?????? this means that the dyer model
-            #  is always just an arithmetic mean of spi and hem when the tank
-            #  is saturated but hey maybe thats what we're looking for).
-            #
-            #  kappa = sqrt((P_u - P_d) / (P_sat - P_d))
-            #  kappa = sqrt((P_u - P_d) / (P_u - P_d))
-            #  kappa = sqrt(1) = 1
-            kappa = 1
-            k_NHNE = 1 / (1 + kappa)
-            dm_inj = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE
-
-
-            # To determine temperature and vapourised mass derivatives,
-            # we're going to have to use: our brain.
-            #  V = const.
-            #  m_l / rho_l + m_v / rho_v = const.
-            #  d/dt (m_l / rho_l + m_v / rho_v) = 0
-            #  d/dt (m_l / rho_l) + d/dt (m_v / rho_v) = 0
-            #  0 = (dm_l * rho_l - m_l * drho_l) / rho_l**2  [quotient rule]
-            #    + (dm_v * rho_v - m_v * drho_v) / rho_v**2
-            # dm_l = -dm_inj - dm_v  [injector and vapourisation]
-            #  0 = ((-dm_inj - dm_v) * rho_l - m_l * drho_l) / rho_l**2
-            #    + (dm_v * rho_v - m_v * drho_v) / rho_v**2
-            #  0 = -dm_inj / rho_l
-            #    - dm_v / rho_l
-            #    - m_l * drho_l / rho_l**2
-            #    + dm_v / rho_v
-            #    - m_v * drho_v / rho_v**2
-            #  0 = dm_v * (1/rho_v - 1/rho_l)
-            #    - dm_inj / rho_l
-            #    - m_l * drho_l / rho_l**2
-            #    - m_v * drho_v / rho_v**2
-            # drho = d/dt (rho) = d/dT (rho) * dT/dt  [chain rule]
-            # drhodT = d/dT (rho)
-            #  0 = dm_v * (1/rho_v - 1/rho_l)
-            #    - dm_inj / rho_l
-            #    - m_l * dT * drhodT_l / rho_l**2
-            #    - m_v * dT * drhodT_v / rho_v**2
-            #  dm_v = (dm_inj / rho_l
-            #         + m_l * dT * drhodT_l / rho_l**2
-            #         + m_v * dT * drhodT_v / rho_v**2
-            #         ) / (1/rho_v - 1/rho_l)
-            #  dm_v = dm_inj / rho_l / (1/rho_v - 1/rho_l)
-            #       + dT / (1/rho_v - 1/rho_l) * (m_l * drhodT_l / rho_l**2
-            #                                   + m_v * drhodT_v / rho_v**2)
-            # let:
-            #   foo = dm_inj / rho_l / (1/rho_v - 1/rho_l)
-            #   bar = (m_l * drhodT_l / rho_l**2
-            #        + m_v * drhodT_v / rho_v**2) / (1/rho_v - 1/rho_l)
-            #  dm_v = foo + dT * bar
-            # So, dm_v depends on dT, but also vice versa:
-            #  d/dt (U) = -dm_inj * h_l  [first law of thermodynamics, adiabatic]
-            #  d/dt (U_w + U_l + U_v) = -dm_inj * h_l
-            #  d/dt (m_w*u_w) + d/dt (m_l*u_l) + d/dt (m_v*u_v) = -dm_inj * h_l
-            #  -dm_inj * h_l = dm_w*u_w + m_w*du_w
-            #                + dm_l*u_l + m_l*du_l
-            #                + dm_v*u_v + m_v*du_v
-            # dm_w = 0  [wall aint going anywhere]
-            # dm_l = -dm_v - dm_inj  [same as earlier]
-            #  -dm_inj * h_l = m_w*du_w + m_l*du_l + m_v*du_v
-            #                + (-dm_v - dm_inj) * u_l
-            #                + dm_v*u_v
-            #  dm_inj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
-            #                       - dm_v*u_l
-            #                       + dm_v*u_v
-            #  dm_inj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
-            #                       + dm_v * (u_v - u_l)
-            # du = d/dt (u) = d/dT (u) * dT/dt
-            # also note:
-            #   u = int (cv) dT
-            #   d/dT (u) = cv
-            # therefore:
-            #   du = dT * cv
-            #  dm_inj * (u_l - h_l) = dT * (m_w*cv_w + m_l*cv_l + m_v*cv_v)
-            #                       + dm_v * (u_v - u_l)
-            # let: Cv = m_w*cv_w + m_l*cv_l + m_v*cv_v
-            #  dm_inj * (u_l - h_l) = dT * Cv + dm_v * (u_v - u_l)
-            #  dT * Cv = dm_inj * (u_l - h_l) + dm_v * (u_l - u_v)
-            # i think conceptually this makes sense as:
-            #  internal energy change = boundary work + phase change energy
-            # which checks out, so: bitta simul lets substitute
-            #  dT * Cv = dm_inj * (u_l - h_l) + (foo + dT * bar) * (u_l - u_v)
-            #  dT * Cv - dT * bar * (u_l - u_v) = dm_inj * (u_l - h_l) + foo * (u_l - u_v)
-            #  dT = (dm_inj * (u_l - h_l) + foo * (u_l - u_v))
-            #     / (Cv - bar * (u_l - u_v))
-            # dandy.
-
-            rho_l = ox.prop("D", "T", T_t, "Q", 0)
-            rho_v = ox.prop("D", "T", T_t, "Q", 1)
-            drhodT_l = (ox.prop("D", "T", T_t + DT, "Q", 0) - rho_l) / DT
-            drhodT_v = (ox.prop("D", "T", T_t + DT, "Q", 1) - rho_v) / DT
-
-            Cv_l = m_l * ox.prop("O", "T", T_t, "Q", 0)
-            Cv_v = m_v * ox.prop("O", "T", T_t, "Q", 1)
-            Cv = Cv_l + Cv_v + C_w
-
-            u_l = ox.prop("U", "T", T_t, "Q", 0)
-            u_v = ox.prop("U", "T", T_t, "Q", 1)
-            h_l = ox.prop("H", "T", T_t, "Q", 0)
-
-            foo = dm_inj / rho_l / (1/rho_v - 1/rho_l)
-            bar = (m_l * drhodT_l / rho_l**2
-                 + m_v * drhodT_v / rho_v**2) \
-                / (1/rho_v - 1/rho_l)
-
-            dT_t = (dm_inj * (u_l - h_l) + foo * (u_l - u_v)) \
-                 / (Cv - bar * (u_l - u_v))
-
-            dm_v = foo + dT_t * bar
-            dm_l = -dm_inj - dm_v
-
-
-        # Otherwise vapour draining.
-        elif m_v > negligible_mass:
-            dm_l = 0.0 # liquid mass is ignored hence fourth (big word init).
-
-            # During this period, temperature and density are used to fully
-            # define the state (density is simple due to fixed volume).
-            rho_v = m_v / V_t
-
-            # Due to numerical inaccuracy, might technically have the properties
-            # of a saturated mixture so just pretend its a saturated vapour.
-            rhosat_v = ox.prop("D", "T", T_t, "Q", 1)
-            if rho_v >= rhosat_v:
-                rho_v = rhosat_v
-
-
-            # Find injector flow rate.
-
-            P_u = ox.prop("P", "T", T_t, "D", rho_v)
-            P_d = P_c
-
-            if P_u <= P_d:
-                raise Exception("no injector pressure ratio")
-
-            # Technically gamma but use 'y' for file size reduction.
-            y_u = ox.prop("C", "T", T_t, "D", rho_v) \
-                / ox.prop("O", "T", T_t, "D", rho_v)
-            # Use compressibility factor to account for non-ideal gas.
-            Z_u = ox.prop("Z", "T", T_t, "D", rho_v)
-
-            # Real compressible flow through an injector, with both
-            # choked and unchoked possibilities:
-            Pr_crit = (2 / (y_u + 1)) ** (y_u / (y_u - 1))
-            Pr_rec = P_d / P_u
-            if Pr_rec <= Pr_crit: # choked.
-                Pterm = (2 / (y_u + 1)) ** ((y_u + 1) / (y_u - 1))
-            else: # unchoked.
-                Pterm = Pr_rec ** (2 / y_u) - Pr_rec ** ((y_u + 1) / y_u)
-                Pterm *= 2 / (y_u - 1)
-            dm_inj = Cd_inj * A_inj * P_u * np.sqrt(y_u / Z_u / R_o / T_t * Pterm)
-
-            # Mass only leaves through injector, and no state change.
-            dm_v = -dm_inj
-
-
-            # Back to the well.
-            #  d/dt (U) = -dm_inj * h  [first law of thermodynamics, adiabatic]
-            #  d/dt (U_w + U) = -dm_inj * h  [no suffix is the non-saturated vapour in the tank]
-            #  d/dt (m_w*u_w) + d/dt (m*u) = -dm_inj * h
-            #  -dm_inj * h = dm_w*u_w + m_w*du_w
-            #              + dm*u + m*du
-            # dm_w = 0  [wall aint going anywhere]
-            # dm = -dm_inj  [only mass change is from injector]
-            #  -dm_inj * h = m_w * du_w
-            #              - dm_inj * u
-            #              + m * du
-            #  dm_inj * (u - h) = m_w * du_w + m * du
-            # du = dT * cv  [previously derived]
-            #  dm_inj * (u - h) = dT * (m_w * cv_w + m * cv)
-            # let: Cv = m_w * cv_w + m * cv
-            #  dm_inj * (u - h) = dT * Cv
-            # => dT = dm_inj * (u - h) / Cv
-            # which makes sense, since only energy change is due to lost flow work.
-
-            u_u = ox.prop("U", "T", T_t, "D", rho_v)
-            h_u = ox.prop("H", "T", T_t, "D", rho_v)
-
-            Cv = C_w + m_v * ox.prop("O", "T", T_t, "D", rho_v)
-
-            dT_t = dm_inj * (u_u - h_u) / Cv
-
-
-        # No oxidiser left, and nothing happens without oxidiser flow.
-        else:
-            raise Exception("no ox left")
-
-
-        # Do fuel regression.
-        dD_f = 0.0
-        dV_f = 0.0
-        dm_reg = 0.0
-        if m_f > negligible_mass: # Gotta be fuel left.
-
-            # Get oxidiser mass flux through the fuel grain.
-            Gox = dm_inj * 4 / pi / D_f**2
-            # Find regression rate from empirical parameters (and ox mass flux).
-            rr_rdot = rr_a0 * Gox**rr_n
-
-            # Fuel mass and diameter change from rdot:
-            dD_f = 2 * rr_rdot
-            dV_f = A_f * rr_rdot
-            dm_reg = rho_f * dV_f
-
-        # Fuel only leaves via regression.
-        dm_f = -dm_reg
-
-
-        # Model the nozzle as an injector, using ideal compressible
-        # flow and both choked and unchoked possibilities:
-        if P_c <= P_a and not (m_l > negligible_mass): # avoid exiting instantly
-            raise Exception("no injector pressure ratio")
-        Pr_crit = (2 / (y_g + 1)) ** (y_g / (y_g - 1))
-        Pr_rec = P_a / P_c
-        if Pr_rec <= Pr_crit: # choked.
-            Pterm = (2 / (y_g + 1)) ** ((y_g + 1) / (y_g - 1))
-        else: # unchoked.
-            Pterm = Pr_rec ** (2 / y_g) - Pr_rec ** ((y_g + 1) / y_g)
-            Pterm *= 2 / (y_g - 1)
-        dm_out = Cd_nzl * A_nzl * P_c * np.sqrt(y_g / R_g / T_g * Pterm)
-
-
-        # Gases in the chamber is just entering - exiting.
-        dm_g = dm_inj + dm_reg - dm_out
-
-
-        # Change in cc gas properties due to added gas.
-        T_n = 0.0
-        Mw_n = 0.0
-        cp_n = 0.0
-        dm_n = dm_reg + dm_inj # new gases is just fuel+ox.
-
-        # Combustion occurs if there is both fuel and oxidiser.
-        if dm_reg != 0 and dm_inj != 0:
-            # Instantaneous oxidiser-fuel ratio.
-            ofr = dm_inj / dm_reg
-
-            # Do cea to find combustion properties.
-            _, Cstar, T_n, Mw_n, y_comb = cea.get_IvacCstrTc_ChmMwGam(P_c, ofr, eps_nzl)
-            Mw_n /= 1000 # stupid non-si return value.
-            # Reconstruct cp from gamma, assuming ideal gas.
-            #  y = cp / (cp - R)
-            #  y = cp / (cp - Ru / Mw)
-            #  y * (cp - Ru / Mw) = cp
-            #  -y * Ru / Mw = cp * (1 - y)
-            #  y * Ru / Mw = cp * (y - 1)
-            # => cp = y * Ru / Mw / (y - 1)
-            cp_n = y_comb * GAS_CONSTANT / Mw_n / (y_comb - 1)
-
-        # Otherwise non-combusting oxidiser.
-        elif dm_inj != 0:
-            # No combustion but chamber gas changes due to oxidiser. Note this is
-            # assuming isothermal mass transfer, so using tank temperature but
-            # with current chamber pressure.
-            T_n = T_t
-            Mw_n = ox.prop("M")
-            cp_n = ox.prop("C", "P", P_c, "T", T_t)
-
-        else:
-            assert dm_reg == 0.0
-
-        # Change in any mass-specific property for a reservoir with
-        # flow in and out:
-        #  d/dt (m*p) = dm_in * p_in - dm_out * p
-
-        # Change in moles:
-        #  dn = d/dt (n_n) - d/dt (n_out)
-        #  dn = dm_n / Mw_n - dm_out / Mw
-        dnmol_g = dm_n / Mw_n - dm_out / Mw_g
-
-        # Change in specific heat:
-        dCp_g = dm_n * cp_n - dm_out * cp_g
-
-        # Change in temperature:
-        #  d/dt (m * cp * T) = dm_n * cp_n * T_n - dm_out * cp * T
-        #  d/dt (m * cp * T) = dm_n * cp_n * T_n - dm_out * cp * T
-        #  d/dt (m * cp) * T + m*cp * dT = dm_n * cp_n * T_n - dm_out * cp * T
-        #  dCp * T + Cp * dT = dm_n * cp_n * T_n - dm_out * cp * T
-        #  Cp * dT = dm_n * cp_n * T_n - dm_out * cp * T - dCp * T
-        #  dT = (dm_n * cp_n * T_n - dm_out * cp * T - dCp * T) / Cp
-        dT_g = (dm_n * cp_n * T_n - dm_out * cp_g * T_g - dCp_g * T_g) / Cp_g
-
-
-        # Return derivatives in input order.
-        return dT_t, dm_l, dm_v, dD_f, dm_g, dnmol_g, dT_g, dCp_g
-
-
-    exced = False
-    try:
-        state = [
-            [T0_t],
-            [m0_l],
-            [m0_v],
-            [D0_f],
-            [m0_g],
-            [nmol0_g],
-            [T0_g],
-            [Cp0_g],
-        ]
-        # Simulate just for some time, TODO: figure out what is
-        # considered the termination of the burn.
-        _time = 0.0
-        while _time < 80.0:
-            _time += Dt
-
-            # While i generally make a point not to use explicit
-            # euler (its just not it), this system performs poorly
-            # under other methods since it is not smooth. So,
-            # explicit euler it is.
-            dstate = df(*[v[-1] for v in state])
-            assert len(dstate) == len(state)
-            for dprop, prop in zip(dstate, state):
-                Dprop = Dt * dprop
-                prop.append(prop[-1] + Dprop)
-
-    except Exception:
-        exced = True
-        traceback.print_exc()
+    # Coupla buffers.
+    T_t     = np.empty(100_000, dtype=np.float64)
+    m_l     = np.empty(100_000, dtype=np.float64)
+    m_v     = np.empty(100_000, dtype=np.float64)
+    D_f     = np.empty(100_000, dtype=np.float64)
+    m_g     = np.empty(100_000, dtype=np.float64)
+    nmol_g  = np.empty(100_000, dtype=np.float64)
+    T_g     = np.empty(100_000, dtype=np.float64)
+    Cp_g    = np.empty(100_000, dtype=np.float64)
+
+    # Pack it up real nice for the sim.
+    state = sim_burn.pack_params(
+        T_t=T_t,
+        m_l=m_l,
+        m_v=m_v,
+        D_f=D_f,
+        m_g=m_g,
+        nmol_g=nmol_g,
+        T_g=T_g,
+        Cp_g=Cp_g,
+
+        V_t=tank_cyl.volume(),
+
+        vff0_o=s.ox_volume_fill_frac,
+
+        C_w=s.tank_wall_mass*s.tank_wall_specific_heat_capacity,
+
+        Cd_inj=s.injector_discharge_coeff,
+        A_inj=s.injector_orifice_area,
+
+        L_f=fuel_cyl.length,
+        rho_f=s.fuox.fuel.density,
+
+        D_c=cc_cyl.outer_diameter,
+        eta_c=s.cc_combustion_efficiency,
+        Vempty_c=cc_cyl.volume(),
+
+        Cd_nzl=s.nozzle_discharge_coeff,
+        A_nzl=s.nozzle_throat_area,
+        eps_nzl=s.nozzle_exit_area / s.nozzle_throat_area,
+
+        T_a=s.ambient_temperature,
+        P_a=s.ambient_pressure,
+        rho_a=s.ambient_density,
+        Mw_a=s.ambient_molar_mass,
+        cp_a=s.ambient_constant_pressure_specific_heat_capacity,
+    )
+
+    # Send it.
+    count = sim_burn.sim_burn(state)
+
+    # Trim unused memory.
+    T_t     = T_t[:count]
+    m_l     = m_l[:count]
+    m_v     = m_v[:count]
+    D_f     = D_f[:count]
+    m_g     = m_g[:count]
+    nmol_g  = nmol_g[:count]
+    T_g     = T_g[:count]
+    Cp_g    = Cp_g[:count]
+    print(T_t)
 
     print(f"Finished burn sim in {time.time() - _start_time:.2f}s")
 
-
-    T_t, m_l, m_v, D_f, m_g, nmol_g, T_g, Cp_g = state
-    T_t = np.array(T_t)
-    m_l = np.array(m_l)
-    m_v = np.array(m_v)
-    D_f = np.array(D_f)
-    m_g = np.array(m_g)
-    nmol_g = np.array(nmol_g)
-    T_g = np.array(T_g)
-    Cp_g = np.array(Cp_g)
 
     def diffarr(x):
         if len(x) == 1:
@@ -961,7 +524,7 @@ def simulate_burn(s):
         return Dx
 
 
-    s.burn_time = (len(T_t) - 1) * Dt
+    s.burn_time = (len(T_t) - 1) * 0.001
     t = np.linspace(0, s.burn_time, len(T_t))
     mask = np.ones(len(t), dtype=bool)
     # mask = (t <= 0.1)
@@ -969,67 +532,67 @@ def simulate_burn(s):
 
     # Reconstruct a bunch of dependant state.
 
-    V_f = L_f * pi / 4 * (D_c**2 - D_f**2)
-    V_c = Vempty_c - V_f
+    # V_f = L_f * pi / 4 * (D_c**2 - D_f**2)
+    # V_c = Vempty_c - V_f
 
-    m_f = rho_f * V_f
+    # m_f = rho_f * V_f
 
-    Dm_inj = -diffarr(m_l + m_v)
-    Dm_reg = -diffarr(m_f)
-    Dm_g = diffarr(m_g)
+    # Dm_inj = -diffarr(m_l + m_v)
+    # Dm_reg = -diffarr(m_f)
+    # Dm_g = diffarr(m_g)
 
-    P_t = np.zeros(len(T_t), dtype=float)
-    # saturated pressure:
-    Pmask = (m_l > negligible_mass)
-    Psat = [ox.prop("P", "T", T, "Q", 0) for T in T_t[Pmask]]
-    P_t[Pmask] = Psat
-    # not:
-    Pmask = ~Pmask & (m_v > negligible_mass)
-    Pnot = [ox.prop("P", "T", T, "D", m / V_t) for T, m in zip(T_t[Pmask], m_v[Pmask])]
-    P_t[Pmask] = Pnot
+    # P_t = np.zeros(len(T_t), dtype=float)
+    # # saturated pressure:
+    # Pmask = (m_l > negligible_mass)
+    # Psat = [ox.prop("P", "T", T, "Q", 0) for T in T_t[Pmask]]
+    # P_t[Pmask] = Psat
+    # # not:
+    # Pmask = ~Pmask & (m_v > negligible_mass)
+    # Pnot = [ox.prop("P", "T", T, "D", m / V_t) for T, m in zip(T_t[Pmask], m_v[Pmask])]
+    # P_t[Pmask] = Pnot
 
-    ofr = np.zeros(len(T_t), dtype=float)
-    ofr_mask = (Dm_reg != 0)
-    ofr[ofr_mask] = Dm_inj[ofr_mask] / Dm_reg[ofr_mask]
-    ofr[~ofr_mask] = 0.0
+    # ofr = np.zeros(len(T_t), dtype=float)
+    # ofr_mask = (Dm_reg != 0)
+    # ofr[ofr_mask] = Dm_inj[ofr_mask] / Dm_reg[ofr_mask]
+    # ofr[~ofr_mask] = 0.0
 
-    R_g = GAS_CONSTANT/(m_g / nmol_g)
+    # R_g = GAS_CONSTANT/(m_g / nmol_g)
 
-    P_c = R_g * T_g * m_g / V_c
+    # P_c = R_g * T_g * m_g / V_c
 
 
-    dm_out = (Dm_inj + Dm_reg - Dm_g) / Dt
+    # dm_out = (Dm_inj + Dm_reg - Dm_g) / Dt
 
-    cp_g = Cp_g / m_g
-    y_g = cp_g / (cp_g - R_g)
+    # cp_g = Cp_g / m_g
+    # y_g = cp_g / (cp_g - R_g)
 
 
     s.ox_mass_liquid = m_l
     s.ox_mass_vapour = m_v
     s.ox_mass = m_l + m_v
-    s.fuel_mass = m_f
+    # s.fuel_mass = m_f
     s.tank_temperature = T_t
-    s.tank_pressure = P_t
-    s.cc_pressure = P_c
+    # s.tank_pressure = P_t
+    # s.cc_pressure = P_c
 
     plotme = [
         # data, title, ylabel, y_lower_limit_as_zero
-        (s.tank_pressure, "Tank pressure", "Pressure [Pa]", False),
-        (s.cc_pressure, "CC pressure", "Pressure [Pa]", False),
+        # (s.tank_pressure, "Tank pressure", "Pressure [Pa]", False),
+        # (s.cc_pressure, "CC pressure", "Pressure [Pa]", False),
         (s.tank_temperature - 273.15, "Tank temperature", "Temperature [dC]", False),
-        (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
-        (Dm_inj / Dt, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
-        (Dm_reg / Dt, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
+        # (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
+        # (Dm_inj / Dt, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
+        # (Dm_reg / Dt, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
         (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]", True),
-        (s.fuel_mass, "Fuel mass", "Mass [kg]", True),
+        # (s.fuel_mass, "Fuel mass", "Mass [kg]", True),
         # (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]", True),
         # (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]", True),
         (m_g, "Gas mass", "ceebs", False),
         (T_g, "Gas temp", "ceebs", False),
         (nmol_g, "Gas number of moles", "ceebs", False),
         (Cp_g / m_g, "Gas cp", "ceebs", False),
-        (dm_out, "Gas exit", "ceebs", False),
-        (y_g, "Gas gamma", "ceebs", False),
+        # (dm_out, "Gas exit", "ceebs", False),
+        # (y_g, "Gas gamma", "ceebs", False),
     ]
     def doplot(plotme):
         plt.figure()
@@ -1056,7 +619,7 @@ def simulate_burn(s):
             plt.xlabel("Time [s]")
             plt.ylabel(ylabel)
             plt.grid()
-            if snapzero and not exced:
+            if snapzero:
                 _, ymax = plt.ylim()
                 plt.ylim(0, ymax)
         plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)

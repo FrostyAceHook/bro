@@ -4,5 +4,8 @@
 **/__pycache__
 
 build/
-bro/**.c
-bro/**.pyd
+
+bro/sim_burn.c
+bro/sim_burn.**.pyd
+
+bro/sim_burn_impl.o
