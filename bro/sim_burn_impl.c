@@ -1,9 +1,17 @@
 // c my beloved.
+
 #include "sim_burn_impl.h"
 
 #include <assert.h>
 #include <math.h>
-#include <stdio.h>
+
+
+#if (defined(BR_HAVEALOOK) && BR_HAVEALOOK)
+  #define BR_LOOKSIE __attribute((__used__))
+#else
+  #define BR_LOOKSIE
+#endif
+
 
 
 typedef signed char       i8;   // 8-bit signed integer (two's complement).
@@ -67,18 +75,22 @@ static f64 tube_vol(f64 L, f64 ID, f64 OD) {
 
 
 
-// Nitrous oxide properties from CoolProp, approximated via rational
-// polynomials by 'bro/func_approx.py'.
+// Nitrous oxide properties from CoolProp, approximated via rational polynomials
+// by 'bro/func_approx.py'.
 
-// Valids bounds of all inputs:
-//  temperature   263.15 K .. 308.15 K
-//  pressure        80 kPa .. 7.2 Mpa
-//  sat. pressure    2 MPa .. 7.2 Mpa
+// All nox properties are only valid for saturated liquid-vapour mixtures
+// (including qualities of exactly 0 or 1), and vapour. Note the whats up
+// everybody points:
+//   nox triple point:     182.34 K  0.08785 MPa
+//   nox critical point:   309.55 K  7.245 MPa
+// Therefore we define our bounds as:
+//  temperature      183 K .. 309 K
+//  pressure        90 kPa .. 7.2 MPa
 //  vap. density   1 kg/m3 .. 325 kg/m3
-//  quality              0 .. 1
-#define NOX_IN_T(T) (263.15 <= (T) && (T) <= 308.15)
-#define NOX_IN_P(P) (0.08 <= (P) && (P) <= 7.2)
-#define NOX_IN_Psat(P) (2 <= (P) && (P) <= 7.2)
+// Note that all inputs and outputs are base si.
+
+#define NOX_IN_T(T) (183 <= (T) && (T) <= 309)
+#define NOX_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
 #define NOX_IN_rho(rho) (1 <= (rho) && (rho) <= 325)
 #define NOX_IN_Q(Q) (0.0 <= (Q) && (Q) <= 1.0)
 
@@ -86,310 +98,344 @@ static f64 tube_vol(f64 L, f64 ID, f64 OD) {
 #define NOX_Mw (44.013e-3) // [kg/mol]
 #define NOX_R (GAS_CONSTANT / NOX_Mw) // [J/kg/K]
 
-static f64 nox_Tsat(f64 P) { // max 0.13% error
+BR_LOOKSIE static f64 nox_Tsat(f64 P) {
     P *= 1e-6; // Pa -> MPa
-    assert(NOX_IN_Psat(P));
-    double x1 = P;
-    double n0 = +3.6113787984517662;
-    double d0 = +0.01676607833192893;
-    double d1 = +0.0025292160857822753;
-    double Num = n0 + x1;
-    double Den = d0 + d1*x1;
-    return Num / Den;
-}
-
-static f64 nox_rho_satliq(f64 T) { // max 0.68% error
-    assert(NOX_IN_T(T));
-    f64 x1 = T;
-    f64 x2 = T*T;
-    f64 n0 = +156087.8754291886;
-    f64 n1 = -810.6533977445022;
-    f64 d0 = +73.69992119127612;
-    f64 d1 = -0.2323813281191897;
+    assert(NOX_IN_P(P));
+    f64 x1 = P;
+    f64 x2 = P*P;
+    f64 n0 = +1.053682149480346;
+    f64 n1 = +5.000029230803551;
+    f64 d0 = +0.0063155487831695655;
+    f64 d1 = +0.021208661457396805;
+    f64 d2 = +0.002480330679198678;
     f64 Num = n0 + n1*x1 + x2;
-    f64 Den = d0 + d1*x1;
+    f64 Den = d0 + d1*x1 + d2*x2;
     return Num / Den;
 }
 
-static f64 nox_rho_satvap(f64 T) { // max 0.08% error
-    assert(NOX_IN_T(T));
-    f64 x1 = T;
-    f64 x3 = T*T*T;
-    f64 n0 = +33298391.761922084;
-    f64 n1 = -204351.1261299974;
-    f64 d0 = -686517.2650492929;
-    f64 d1 = +3146.20641220234;
-    f64 d3 = -0.009715066047700149;
-    f64 Num = n0 + n1*x1 + x3;
-    f64 Den = d0 + d1*x1 + d3*x3;
-    return Num / Den;
-}
-
-static f64 nox_P_satliq(f64 T) { // max 0.84% error
+BR_LOOKSIE static f64 nox_rho_satliq(f64 T) {
     assert(NOX_IN_T(T));
     f64 x1 = T;
     f64 x2 = T*T;
-    f64 c0 = +49628368.03406795;
-    f64 c1 = -419724.2426924475;
-    f64 c2 = +913.1756437857401;
-    return c0 + c1*x1 + c2*x2;
+    f64 n0 = +122309.80087089837;
+    f64 n1 = -703.8266867155928;
+    f64 d0 = +78.84320429264461;
+    f64 d1 = -0.3947682772066382;
+    f64 d2 = +0.0004576329029363305;
+    f64 Num = n0 + n1*x1 + x2;
+    f64 Den = d0 + d1*x1 + d2*x2;
+    return Num / Den;
 }
 
-static f64 nox_P(f64 T, f64 rho) { // vapour only, max 0.85% error
+BR_LOOKSIE static f64 nox_rho_satvap(f64 T) {
+    assert(NOX_IN_T(T));
+    f64 x1 = T;
+    f64 x2 = T*T;
+    f64 x4 = x2*x2;
+    f64 n0 = -5616563626.488913;
+    f64 n1 = +75961789.44613385;
+    f64 n2 = -283334.26225138275;
+    f64 d0 = -102348183.29992932;
+    f64 d1 = +412063.5030797808;
+    f64 d4 = -0.002764818539542846;
+    f64 Num = n0 + n1*x1 + n2*x2 + x4;
+    f64 Den = d0 + d1*x1 + d4*x4;
+    return Num / Den;
+}
+
+BR_LOOKSIE static f64 nox_Psat(f64 T) {
+    assert(NOX_IN_T(T));
+    f64 x1 = T;
+    f64 x2 = T*T;
+    f64 x3 = x2*T;
+    f64 x5 = x3*x2;
+    f64 c1 = +3496.03701234121;
+    f64 c3 = -0.248418557185819;
+    f64 c5 = +4.752823512296013e-06;
+    return c1*x1 + c3*x3 + c5*x5;
+}
+
+BR_LOOKSIE static f64 nox_P(f64 T, f64 rho) {
     assert(NOX_IN_T(T));
     assert(NOX_IN_rho(rho));
     f64 x1 = T;
     f64 y2 = rho*rho;
-    f64 x2y1 = T*T;
+    f64 x2y1 = T*T*rho;
     f64 y3 = y2*rho;
-    f64 n5 = -1004.4435204505293;
-    f64 n7 = +3.7264490783988635;
-    f64 d1 = +0.019777885554525112;
+    f64 n5 = -1002.3823520461443;
+    f64 n7 = +3.7137717864729005;
+    f64 d1 = +0.019689134939176935;
     f64 Num = n5*y2 + n7*x2y1 + y3;
     f64 Den = d1*x1;
     return Num / Den;
 }
 
-static f64 nox_s_satliq(f64 P) { // max 0.83% error
+BR_LOOKSIE static f64 nox_s_satliq(f64 P) {
     P *= 1e-6; // Pa -> MPa
-    assert(NOX_IN_Psat(P));
-    f64 x1 = P;
-    f64 x2 = P*P;
-    f64 x6 = x2*x2*x2;
-    f64 n0 = -330735366.98577213;
-    f64 d0 = -817420.0670422539;
-    f64 d1 = +158470.39606104503;
-    f64 d2 = -14678.975863932443;
-    f64 Num = -n0;
-    f64 Den = d0 + d1*x1 + d2*x2 + x6;
-    return Num / Den;
-}
-
-static f64 nox_s_satvap(f64 P) { // max 0.47% error
-    P *= 1e-6; // Pa -> MPa
-    assert(NOX_IN_Psat(P));
-    f64 x1 = P;
-    f64 x2 = P*P;
-    f64 n0 = +246.10928756012322;
-    f64 n1 = -40.26239399448462;
-    f64 d0 = +0.14145002404877624;
-    f64 d1 = -0.018736152701492044;
-    f64 Num = n0 + n1*x1 + x2;
-    f64 Den = d0 + d1*x1;
-    return Num / Den;
-}
-
-static f64 nox_cp(f64 T, f64 P) { // vapour only, max 3.6% error
-    P *= 1e-6; // Pa -> MPa
-    assert(NOX_IN_T(T));
     assert(NOX_IN_P(P));
-    // blows.
-    f64 x1 = T;
-    f64 y1 = P;
-    f64 x2 = T*T;
-    f64 y2 = P*P;
-    f64 n1 = -116.51699084548176;
-    f64 n2 = -7300.734145907978;
-    f64 d0 = -91.65103697146496;
-    f64 d1 = +0.5241696296156855;
-    f64 d2 = -14.921756479203275;
-    f64 d5 = +0.7146187152094382;
-    f64 Num = n1*x1 + n2*y1 + x2;
-    f64 Den = d0 + d1*x1 + d2*y1 + d5*y2;
-    return Num / Den;
-}
-
-static f64 nox_cv_satliq(f64 T) { // max 0.24% error
-    assert(NOX_IN_T(T));
-    f64 x1 = T;
-    f64 x2 = T*T;
-    f64 n0 = +1144787.6651075622;
-    f64 n1 = -3937.01681226655;
-    f64 d0 = +1192.576384943476;
-    f64 d1 = -3.7875478741887108;
-    f64 Num = n0 + n1*x1 + x2;
-    f64 Den = d0 + d1*x1;
-    return Num / Den;
-}
-
-static f64 nox_cv_satvap(f64 T) { // max 1.3% error
-    assert(NOX_IN_T(T));
-    f64 x1 = T;
-    f64 x2 = T*T;
-    f64 d0 = -1.7249439211880886;
-    f64 d1 = +0.015009354557928997;
-    f64 d2 = -2.7648472161050912e-05;
-    f64 Num = x1;
+    f64 x1 = P;
+    f64 x2 = P*P;
+    f64 x4 = x2*x2;
+    f64 x5 = x4*P;
+    f64 n0 = -355.8755188448979;
+    f64 n1 = +3779.467529165695;
+    f64 n4 = -13.18529083615938;
+    f64 d0 = +2.6822755391518727;
+    f64 d1 = +6.034067534443412;
+    f64 d2 = -0.7009834045855325;
+    f64 Num = n0 + n1*x1 + n4*x4 + x5;
     f64 Den = d0 + d1*x1 + d2*x2;
     return Num / Den;
 }
 
-static f64 nox_cv(f64 T, f64 P) { // vapour only, max 1.2% error
+BR_LOOKSIE static f64 nox_s_satvap(f64 P) {
+    P *= 1e-6; // Pa -> MPa
+    assert(NOX_IN_P(P));
+    f64 x1 = P;
+    f64 x2 = P*P;
+    f64 x3 = x2*P;
+    f64 n0 = +106.29753009318405;
+    f64 n1 = +275.8845939008316;
+    f64 n2 = -45.72111883807674;
+    f64 d0 = +0.04935480191796069;
+    f64 d1 = +0.16833373623393996;
+    f64 d2 = -0.022833528970010734;
+    f64 Num = n0 + n1*x1 + n2*x2 + x3;
+    f64 Den = d0 + d1*x1 + d2*x2;
+    return Num / Den;
+}
+
+BR_LOOKSIE static f64 nox_cp(f64 T, f64 P) {
     P *= 1e-6; // Pa -> MPa
     assert(NOX_IN_T(T));
     assert(NOX_IN_P(P));
     f64 x1 = T;
     f64 y1 = P;
-    f64 x1y1 = T*P;
+    f64 x2 = T*T;
     f64 y2 = P*P;
-    f64 x3 = T*T*T;
-    f64 n2 = +5789256.963839073;
-    f64 n4 = -28105.935930542626;
-    f64 n5 = +4134.052836043407;
-    f64 d0 = -44609.45406542292;
-    f64 d1 = +277.52613563434414;
-    f64 d2 = -4639.098422516753;
-    f64 Num = n2*y1 + n4*x1y1 + n5*y2 + x3;
-    f64 Den = d0 + d1*x1 + d2*y1;
+    f64 n1 = -159.82009434320338;
+    f64 n2 = -4999.721561359963;
+    f64 d1 = -0.16874605625391056;
+    f64 d2 = -9.78607781596831;
+    f64 d3 = +0.001104532552674854;
+    f64 d5 = +0.3326972587207335;
+    f64 Num = n1*x1 + n2*y1 + x2;
+    f64 Den = d1*x1 + d2*y1 + d3*x2 + d5*y2;
     return Num / Den;
 }
 
-static f64 nox_h_satliq(f64 T) { // max 2.0% error
+BR_LOOKSIE static f64 nox_cv_satliq(f64 T) {
     assert(NOX_IN_T(T));
     f64 x1 = T;
-    f64 d0 = +0.0056002005901963905;
-    f64 d1 = -1.4442735468669312e-05;
-    f64 Num = x1;
+    f64 x2 = T*T;
+    f64 x3 = x2*T;
+    f64 n0 = +99998624.02836193;
+    f64 n1 = -417287.50625049777;
+    f64 d0 = +67167.41562085839;
+    f64 d2 = -1.6299051411280265;
+    f64 d3 = +0.0030157641836329814;
+    f64 Num = n0 + n1*x1 + x3;
+    f64 Den = d0 + d2*x2 + d3*x3;
+    return Num / Den;
+}
+
+BR_LOOKSIE static f64 nox_cv_satvap(f64 T) {
+    assert(NOX_IN_T(T));
+    f64 x1 = T;
+    f64 x2 = T*T;
+    f64 x3 = x2*T;
+    f64 n1 = +1053181.5139038756;
+    f64 n2 = -3536.041105280067;
+    f64 d0 = +319981.2745750608;
+    f64 d1 = -986.8229772784155;
+    f64 Num = n1*x1 + n2*x2 + x3;
     f64 Den = d0 + d1*x1;
     return Num / Den;
 }
 
-static f64 nox_h_satvap(f64 T) { // max 0.34% error
+BR_LOOKSIE static f64 nox_cv(f64 T, f64 P) {
+    P *= 1e-6; // Pa -> MPa
     assert(NOX_IN_T(T));
-    double x1 = T;
-    double x2 = T*T;
-    double n0 = +44029181155.05621;
-    double n1 = -138886400.2908723;
-    double d0 = +106633.1549244389;
-    double d1 = -334.3462973733325;
-    double Num = n0 + n1*x1 + x2;
-    double Den = d0 + d1*x1;
-    return Num / Den;
-}
-
-static f64 nox_h(f64 T, f64 rho) { // vapour only, max 0.76% error
-    assert(NOX_IN_T(T));
-    assert(NOX_IN_rho(rho));
-    // just lovely.
+    assert(NOX_IN_P(P));
     f64 x1 = T;
-    f64 y1 = rho;
-    f64 d0 = +0.00038666795882217524;
-    f64 d1 = +8.229213007432222e-07;
-    f64 d2 = +8.20724847683098e-07;
-    f64 Num = x1;
-    f64 Den = d0 + d1*x1 + d2*y1;
+    f64 y1 = P;
+    f64 x2 = T*T;
+    f64 x1y1 = T*P;
+    f64 y2 = P*P;
+    f64 n2 = +404.17179888559093;
+    f64 n3 = +0.0116226190297697;
+    f64 n4 = -1.6302745906659892;
+    f64 d0 = -0.6247719294046308;
+    f64 d1 = +0.007139106757436227;
+    f64 d4 = -0.0005336079270844953;
+    f64 Num = n2*y1 + n3*x2 + n4*x1y1 + y2;
+    f64 Den = d0 + d1*x1 + d4*x1y1;
     return Num / Den;
 }
 
-static f64 nox_u_satliq(f64 T) { // max 1.4% error
+BR_LOOKSIE static f64 nox_h_satliq(f64 T) {
     assert(NOX_IN_T(T));
     f64 x1 = T;
     f64 x3 = T*T*T;
     f64 x4 = x3*T;
-    f64 c0 = -7267788.558102235;
-    f64 c1 = +51741.51506234207;
-    f64 c3 = -0.6502712552305997;
-    f64 c4 = +0.0011765915303324403;
-    return c0 + c1*x1 + c3*x3 + c4*x4;
-}
-
-static f64 nox_u_satvap(f64 T) { // max 0.19% error
-    assert(NOX_IN_T(T));
-    f64 x1 = T;
-    f64 x2 = T*T;
-    f64 n0 = +34599947743.215485;
-    f64 n1 = -109730783.13591044;
-    f64 d0 = +93495.74130581485;
-    f64 d1 = -295.39713418629657;
-    f64 Num = n0 + n1*x1 + x2;
+    f64 n0 = -1554844073854.8723;
+    f64 n1 = +10248538986.948492;
+    f64 n3 = -53363.27024534557;
+    f64 d0 = +7175993.87640348;
+    f64 d1 = -22685.089801817525;
+    f64 Num = n0 + n1*x1 + n3*x3 + x4;
     f64 Den = d0 + d1*x1;
     return Num / Den;
 }
 
-static f64 nox_u(f64 T, f64 rho) { // vapour only, max 0.54% error
+BR_LOOKSIE static f64 nox_h_satvap(f64 T) {
+    assert(NOX_IN_T(T));
+    f64 x1 = T;
+    f64 x2 = T*T;
+    f64 x4 = x2*x2;
+    f64 n0 = +36006860815.96613;
+    f64 n1 = -145833527.21804488;
+    f64 d0 = +133090.43360716323;
+    f64 d1 = -784.7985028166469;
+    f64 d2 = +1.1478421530010148;
+    f64 Num = n0 + n1*x1 + x4;
+    f64 Den = d0 + d1*x1 + d2*x2;
+    return Num / Den;
+}
+
+BR_LOOKSIE static f64 nox_h(f64 T, f64 rho) {
     assert(NOX_IN_T(T));
     assert(NOX_IN_rho(rho));
-    // once again beautiful. thank you energy.
     f64 x1 = T;
     f64 y1 = rho;
-    f64 d0 = +0.00037742028086887655;
-    f64 d1 = +1.1447255525542155e-06;
-    f64 d2 = +7.272303965256336e-07;
-    f64 Num = x1;
+    f64 x2 = T*T;
+    f64 n1 = +72.32632139879598;
+    f64 d0 = -0.051735087047641605;
+    f64 d1 = +0.000958993783893223;
+    f64 d2 = +0.0003057500026811124;
+    f64 Num = n1*x1 + x2;
     f64 Den = d0 + d1*x1 + d2*y1;
     return Num / Den;
 }
 
-static f64 nox_Z(f64 T, f64 rho) { // vapour only, max 1.0% error
+BR_LOOKSIE static f64 nox_u_satliq(f64 T) {
+    assert(NOX_IN_T(T));
+    f64 x1 = T;
+    f64 x2 = T*T;
+    f64 x3 = x2*T;
+    f64 n0 = -5712868562742.414;
+    f64 n1 = +48367409598.93219;
+    f64 n2 = -94710942.69677454;
+    f64 d0 = +17576470.543787282;
+    f64 d1 = -54575.615844086264;
+    f64 Num = n0 + n1*x1 + n2*x2 + x3;
+    f64 Den = d0 + d1*x1;
+    return Num / Den;
+}
+
+BR_LOOKSIE static f64 nox_u_satvap(f64 T) {
+    assert(NOX_IN_T(T));
+    f64 x1 = T;
+    f64 x2 = T*T;
+    f64 x4 = x2*x2;
+    f64 n0 = +40973028771.259094;
+    f64 n1 = -161630532.82151473;
+    f64 d0 = +163516.09730925123;
+    f64 d1 = -930.7444896485703;
+    f64 d2 = +1.3044812440250384;
+    f64 Num = n0 + n1*x1 + x4;
+    f64 Den = d0 + d1*x1 + d2*x2;
+    return Num / Den;
+}
+
+BR_LOOKSIE static f64 nox_u(f64 T, f64 rho) {
+    assert(NOX_IN_T(T));
+    assert(NOX_IN_rho(rho));
+    f64 x1 = T;
+    f64 y1 = rho;
+    f64 x2 = T*T;
+    f64 n1 = +133.30350610563823;
+    f64 n2 = -47.121524818758765;
+    f64 d0 = -0.05688971632749395;
+    f64 d1 = +0.0012334671429795158;
+    f64 d2 = +0.00017800897800483042;
+    f64 Num = n1*x1 + n2*y1 + x2;
+    f64 Den = d0 + d1*x1 + d2*y1;
+    return Num / Den;
+}
+
+BR_LOOKSIE static f64 nox_Z(f64 T, f64 rho) {
     assert(NOX_IN_T(T));
     assert(NOX_IN_rho(rho));
     f64 y1 = rho;
     f64 x1y1 = T*rho;
     f64 y2 = rho*rho;
-    f64 c0 = +0.9984208759508151;
-    f64 c2 = -0.009865255977849555;
-    f64 c4 = +2.309181429551549e-05;
-    f64 c5 = +2.5526116512486693e-06;
+    f64 c0 = +0.9962244155069389;
+    f64 c2 = -0.010033321729222494;
+    f64 c4 = +2.3783799563418678e-05;
+    f64 c5 = +2.383200854104837e-06;
     return c0 + c2*y1 + c4*x1y1 + c5*y2;
 }
 
 
 
-// CEA results from rocketcea, approximated via rational
-// polynomials by 'bro/func_approx.py'.
+// Paraffin+NOx CEA results from rocketcea, approximated via rational polynomials
+// by 'bro/func_approx.py'.
 
-// Valids bounds of all inputs:
-//  pressure     80 kPa .. 7 Mpa
-//  ox-fuel ratio   0.5 .. 13
+// For the bounds of the inputs, we use:
+//  chamber pressure  90 kPa .. 7.2 Mpa
+//  ox-fuel ratio        0.5 .. 13
+// Note that all inputs and outputs are base si.
 
-static f64 cea_T__high(f64 P, f64 ofr) { // max 4.3% error
-    f64 x1 = P;
-    f64 y1 = ofr;
-    f64 x1y1 = P*ofr;
-    f64 y2 = ofr*ofr;
-    f64 x3 = P*P*P;
-    f64 x2y1 = x1y1*P;
-    f64 n0 = -23.39955473159082;
-    f64 n1 = +2.1207746242104513;
-    f64 n2 = +5.921369062404011;
-    f64 d1 = +0.0018229851740627402;
-    f64 d4 = -0.000293794779021038;
-    f64 d5 = +0.0004593559262770208;
-    f64 d6 = -9.851749432640628e-06;
-    f64 d7 = +2.294535003217659e-05;
-    f64 Num = n0 + n1*x1 + n2*y1 + y2;
-    f64 Den = d1*x1 + d4*x1y1 + d5*y2 + d6*x3 + d7*x2y1;
-    return Num / Den;
-}
-static f64 cea_T__low(f64 P, f64 ofr) { // max 3.9% error
+#define CEA_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
+#define CEA_IN_ofr(ofr) (0.5 <= (ofr) && (ofr) <= 13)
+
+
+static f64 cea_T__high(f64 P, f64 ofr) {
     f64 x1 = P;
     f64 y1 = ofr;
     f64 x1y1 = P*ofr;
     f64 y2 = ofr*ofr;
     f64 x2y1 = x1y1*P;
     f64 x1y2 = x1y1*ofr;
-    f64 n0 = -0.3308903646269448;
-    f64 n2 = +7.586197253157754;
-    f64 n4 = +8.808819483900445;
-    f64 d1 = +0.00022361880493252257;
-    f64 d2 = +0.00944138717224415;
-    f64 d4 = +0.007895570851432925;
-    f64 d5 = -0.0011657313243630958;
-    f64 d7 = -1.3745327377942885e-05;
-    f64 d8 = -0.001026130067031718;
-    f64 Num = n0 + n2*y1 + n4*x1y1 + y2;
-    f64 Den = d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d7*x2y1 + d8*x1y2;
+    f64 n0 = -14.286699845712628;
+    f64 n1 = -32.4062851919402;
+    f64 n2 = +3.4742076078850297;
+    f64 n4 = +18.309776531751787;
+    f64 d1 = +0.008300237024458222;
+    f64 d4 = +0.001385352578317833;
+    f64 d5 = +0.00041962485459847375;
+    f64 d7 = -4.215277067475584e-06;
+    f64 d8 = +0.00023245123290958759;
+    f64 Num = n0 + n1*x1 + n2*y1 + n4*x1y1 + y2;
+    f64 Den = d1*x1 + d4*x1y1 + d5*y2 + d7*x2y1 + d8*x1y2;
     return Num / Den;
 }
-static f64 cea_T(f64 P, f64 ofr) { // see constituents.
+static f64 cea_T__low(f64 P, f64 ofr) {
+    f64 x1 = P;
+    f64 y1 = ofr;
+    f64 x1y1 = P*ofr;
+    f64 n0 = +4.625880807530353;
+    f64 n1 = +4.240967496861169;
+    f64 d0 = +0.0062645868710667785;
+    f64 d1 = +0.003833484131106042;
+    f64 d2 = -0.0006506284584737187;
+    f64 d4 = -0.0005047873316636391;
+    f64 Num = n0 + n1*x1 + y1;
+    f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1;
+    return Num / Den;
+}
+BR_LOOKSIE static f64 cea_T(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
+    assert(CEA_IN_P(P));
+    assert(CEA_IN_ofr(ofr));
     // Different approxs for different input regions.
     if (ofr >= 4)
         return cea_T__high(P, ofr);
     return cea_T__low(P, ofr);
 }
 
-static f64 cea_cp__high(f64 P, f64 ofr) { // max 4.8% error
+static f64 cea_cp__high(f64 P, f64 ofr) {
     f64 x1 = P;
     f64 y1 = ofr;
     f64 x1y1 = P*ofr;
@@ -397,41 +443,22 @@ static f64 cea_cp__high(f64 P, f64 ofr) { // max 4.8% error
     f64 x2y1 = x1y1*P;
     f64 x1y2 = x1y1*ofr;
     f64 y3 = ofr*ofr*ofr;
-    f64 n1 = +3802.3766890029965;
-    f64 n4 = -959.1089167566258;
-    f64 n6 = +0.9740826587244922;
-    f64 n7 = -3.5480311720693734;
-    f64 n8 = +75.4934686487755;
-    f64 d0 = +0.06375088655715791;
-    f64 d1 = +2.0937979929620574;
-    f64 d2 = -0.012683649993537984;
-    f64 d4 = -0.5040092283785854;
-    f64 d8 = +0.03403190253379037;
-    f64 d9 = +0.00023048707705274537;
+    f64 n1 = +3582.944641587491;
+    f64 n4 = -907.659602547744;
+    f64 n6 = +0.8638673972095523;
+    f64 n7 = -3.09295057735193;
+    f64 n8 = +70.73570153378617;
+    f64 d0 = +0.06115388267778262;
+    f64 d1 = +1.9517349532470427;
+    f64 d2 = -0.012085905000346658;
+    f64 d4 = -0.47145131429742476;
+    f64 d8 = +0.03175824988676035;
+    f64 d9 = +0.0002303751013953221;
     f64 Num = n1*x1 + n4*x1y1 + n6*x3 + n7*x2y1 + n8*x1y2 + y3;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d8*x1y2 + d9*y3;
     return Num / Den;
 }
-static f64 cea_cp__low_right(f64 P, f64 ofr) { // max 5.8% error
-    f64 x1 = P;
-    f64 y1 = ofr;
-    f64 x1y1 = P*ofr;
-    f64 y2 = ofr*ofr;
-    f64 x1y2 = x1y1*ofr;
-    f64 n0 = +4.138832624431316;
-    f64 n1 = +0.29817405524316326;
-    f64 n2 = -3.2575841375358316;
-    f64 d0 = +0.0005884213088340639;
-    f64 d1 = +7.309846342943449e-05;
-    f64 d2 = -0.0007528849169182324;
-    f64 d4 = -4.3580339523010414e-05;
-    f64 d5 = +0.0003868623137207404;
-    f64 d8 = +1.9187426863527176e-05;
-    f64 Num = n0 + n1*x1 + n2*y1 + y2;
-    f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d8*x1y2;
-    return Num / Den;
-}
-static f64 cea_cp__low_left(f64 P, f64 ofr) { // max 11.83% error (skull emoji)
+static f64 cea_cp__low_left(f64 P, f64 ofr) {
     f64 x1 = P;
     f64 y1 = ofr;
     f64 x2 = P*P;
@@ -440,25 +467,46 @@ static f64 cea_cp__low_left(f64 P, f64 ofr) { // max 11.83% error (skull emoji)
     f64 x2y1 = x1y1*P;
     f64 x1y2 = x1y1*ofr;
     f64 y3 = y2*ofr;
-    f64 n0 = +3.0551837534331043;
-    f64 n1 = +1.1168085957129472;
-    f64 n2 = -3.057032048465364;
-    f64 n3 = -0.08801722733929103;
-    f64 n4 = -0.2480662508580779;
-    f64 d0 = +0.00035410768902353467;
-    f64 d1 = +0.00019003775520538854;
-    f64 d2 = -0.0004712179241529132;
-    f64 d4 = -0.00012521491909272612;
-    f64 d5 = +0.00021512281760482563;
-    f64 d7 = +4.846442773758666e-07;
-    f64 d8 = +3.615723753207365e-05;
-    f64 d9 = +2.406864519884499e-05;
+    f64 n0 = +2.8700843792143695;
+    f64 n1 = +1.4321259855091084;
+    f64 n2 = -2.951652427295875;
+    f64 n3 = -0.2420415412480568;
+    f64 n4 = -0.35193895657900276;
+    f64 d0 = +0.0003557287035334117;
+    f64 d1 = +0.00018934292736992974;
+    f64 d2 = -0.0005034451842726294;
+    f64 d4 = -7.726545211497027e-05;
+    f64 d5 = +0.00023583511725994315;
+    f64 d7 = -2.1317881064428632e-05;
+    f64 d8 = +1.85195099174797e-05;
+    f64 d9 = +2.336730752102996e-05;
     f64 Num = n0 + n1*x1 + n2*y1 + n3*x2 + n4*x1y1 + y2;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d7*x2y1 + d8*x1y2 + d9*y3;
     return Num / Den;
 }
-static f64 cea_cp(f64 P, f64 ofr) { // see constituents.
+static f64 cea_cp__low_right(f64 P, f64 ofr) {
+    f64 x1 = P;
+    f64 y1 = ofr;
+    f64 x1y1 = P*ofr;
+    f64 y2 = ofr*ofr;
+    f64 x1y2 = x1y1*ofr;
+    f64 n0 = +4.295929211019145;
+    f64 n1 = +0.28907793370196055;
+    f64 n2 = -3.367483987949862;
+    f64 d0 = +0.0005978622331052173;
+    f64 d1 = +7.182771715581137e-05;
+    f64 d2 = -0.0007415570025024972;
+    f64 d4 = -4.289368017656845e-05;
+    f64 d5 = +0.00037331217091959564;
+    f64 d8 = +1.8653015095784888e-05;
+    f64 Num = n0 + n1*x1 + n2*y1 + y2;
+    f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d8*x1y2;
+    return Num / Den;
+}
+BR_LOOKSIE static f64 cea_cp(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
+    assert(CEA_IN_P(P));
+    assert(CEA_IN_ofr(ofr));
     // Different approxs for different input regions.
     if (ofr >= 4)
         return cea_cp__high(P, ofr);
@@ -467,21 +515,23 @@ static f64 cea_cp(f64 P, f64 ofr) { // see constituents.
     return cea_cp__low_left(P, ofr);
 }
 
-static f64 cea_Mw(f64 P, f64 ofr) { // max 4.9% error
+BR_LOOKSIE static f64 cea_Mw(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
+    assert(CEA_IN_P(P));
+    assert(CEA_IN_ofr(ofr));
     f64 x1 = P;
     f64 y1 = ofr;
     f64 x2 = P*P;
     f64 x1y1 = P*ofr;
     f64 y2 = ofr*ofr;
-    f64 n0 = +0.1841818441210476;
-    f64 n1 = +0.7780884860427217;
-    f64 n3 = +0.005825775742224297;
-    f64 n4 = +0.14145416999491983;
-    f64 d1 = +64.3339970083186;
-    f64 d2 = +66.80439701942177;
-    f64 d3 = +0.15251463574592666;
-    f64 d5 = +30.325772888462538;
+    f64 n0 = +0.21024398321396112;
+    f64 n1 = +0.7486891502942208;
+    f64 n3 = +0.0037434970654549094;
+    f64 n4 = +0.1346327815444957;
+    f64 d1 = +61.5856277715907;
+    f64 d2 = +68.42132631506553;
+    f64 d3 = +0.03177433731792165;
+    f64 d5 = +30.142213791419902;
     f64 Num = n0 + n1*x1 + n3*x2 + n4*x1y1 + y2;
     f64 Den = d1*x1 + d2*y1 + d3*x2 + d5*y2;
     return Num / Den;
@@ -489,21 +539,33 @@ static f64 cea_Mw(f64 P, f64 ofr) { // max 4.9% error
 
 
 
-// Paraffin and Nox regression rate constants.
+// Paraffin properties from Hybrid Rocket Propulsion Handbook, Karp & Jens.
 
-#define RR_a0 (1.55e-4)
-#define RR_n (0.5)
-
+#define PARAFFIN_rho (924.5) // [kg/m^3]
 
 
-// Couple more constants.
 
-#define Dt (0.001)      // [s], discrete calculus over time.
-#define DT (0.02)       // [K], discrete calculus over temperature.
+// Paraffin+NOx regression rate constants from Hybrid Rocket Propulsion Handbook,
+// Karp & Jens.
+
+#define RR_a0 (1.55e-4) // [-]
+#define RR_n (0.5) // [-]
+
+
+
+// Other (tweakable) system constants.
+
+#define Dt (0.001) // [s], discrete calculus over time.
+#define DT (0.02) // [K], discrete calculus over temperature.
 #define NEGLIGIBLE_MASS (0.001) // [kg], assume nothing if <= this.
+#define MAX_TIME (35) // [s], stop sim after this time.
 
 
+
+// Implements one integration step of the system (where `i` is the set-count of
+// the time-dependant arrays).
 static void step_state(implState* s, int i) {
+
     // Current state variables.
     f64 T_t = s->T_t[i - 1];
     f64 m_l = s->m_l[i - 1];
@@ -516,9 +578,9 @@ static void step_state(implState* s, int i) {
 
     // Reconstruct some cc/fuel state.
     f64 V_f = tube_vol(s->L_f, D_f, s->D_c);
-    f64 A_f = cyl_area(s->L_f, D_f);
+    f64 A_f = cyl_area(s->L_f, D_f); // inner fuel grain surface area.
     f64 V_c = s->Vempty_c - V_f;
-    f64 m_f = s->rho_f * V_f;
+    f64 m_f = PARAFFIN_rho * V_f;
 
     // Reconstruct some cc gas state.
     f64 cp_g = Cp_g / m_g;
@@ -544,9 +606,8 @@ static void step_state(implState* s, int i) {
 
         // Find injector flow rate.
 
-        f64 P_u = nox_P_satliq(T_t); // tank at saturated pressure.
+        f64 P_u = nox_Psat(T_t); // tank at saturated pressure.
         f64 P_d = P_c;
-        printf("P_u %f\n", P_u);
 
         if (P_u <= P_d)
             goto NO_INJECTOR_FLOW;
@@ -563,14 +624,19 @@ static void step_state(implState* s, int i) {
         f64 s_d_l = nox_s_satliq(P_d);
         f64 s_d_v = nox_s_satvap(P_d);
         f64 x_d = (s_u - s_d_l) / (s_d_v - s_d_l);
+        assert(0 <= x_d && x_d <= 1.0);
         f64 h_u = nox_h_satliq(T_t);
         f64 T_d = nox_Tsat(P_d); // since our prop funcs expect temp.
         f64 h_d_l = nox_h_satliq(T_d);
         f64 h_d_v = nox_h_satvap(T_d);
-        f64 h_d = (1.0 - x_d)*h_d_l + x_d*h_d_v;
+        f64 h_d = (1 - x_d)*h_d_l + x_d*h_d_v;
         f64 rho_d_l = nox_rho_satliq(T_d);
         f64 rho_d_v = nox_rho_satvap(T_d);
-        f64 rho_d = (1.0 - x_d)*rho_d_l + x_d*rho_d_v;
+        // gotta do the quality ratios in specific-volume.
+        f64 v_d_l = 1 / rho_d_l;
+        f64 v_d_v = 1 / rho_d_v;
+        f64 v_d = (1 - x_d)*v_d_l + x_d*v_d_v;
+        f64 rho_d = 1 / v_d;
         f64 mdot_HEM = s->Cd_inj * s->A_inj * rho_d * sqrt(2 * (h_u - h_d));
 
         // Generalised non-homogenous non-equilibrium model:
@@ -584,7 +650,7 @@ static void step_state(implState* s, int i) {
         //  kappa = sqrt(1) = 1
         f64 kappa = 1;
         f64 k_NHNE = 1 / (1 + kappa);
-        f64 dm_inj = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE;
+        dm_inj = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE;
 
 
         // To determine temperature and vapourised mass derivatives,
@@ -657,7 +723,8 @@ static void step_state(implState* s, int i) {
         //  internal energy change = boundary work + phase change energy
         // which checks out, so: bitta simul lets substitute
         //  dT * Cv = dm_inj * (u_l - h_l) + (foo + dT * bar) * (u_l - u_v)
-        //  dT * Cv - dT * bar * (u_l - u_v) = dm_inj * (u_l - h_l) + foo * (u_l - u_v)
+        //  dT * Cv - dT * bar * (u_l - u_v) = dm_inj * (u_l - h_l)
+        //                                   + foo * (u_l - u_v)
         //  dT = (dm_inj * (u_l - h_l) + foo * (u_l - u_v))
         //     / (Cv - bar * (u_l - u_v))
         // dandy.
@@ -726,7 +793,7 @@ static void step_state(implState* s, int i) {
             Pterm = pow(Pr_rec, 2 / y_u) - pow(Pr_rec, (y_u + 1) / y_u);
             Pterm *= 2 / (y_u - 1);
         }
-        f64 dm_inj = s->Cd_inj * s->A_inj * P_u * sqrt(y_u / Z_u / NOX_R / T_t * Pterm);
+        dm_inj = s->Cd_inj*s->A_inj*P_u * sqrt(y_u / Z_u / NOX_R / T_t * Pterm);
 
         // Mass only leaves through injector, and no state change.
         dm_v = -dm_inj;
@@ -734,7 +801,8 @@ static void step_state(implState* s, int i) {
 
         // Back to the well.
         //  d/dt (U) = -dm_inj * h  [first law of thermodynamics, adiabatic]
-        //  d/dt (U_w + U) = -dm_inj * h  [no suffix is the non-saturated vapour in the tank]
+        // using no suffix is the non-saturated vapour in the tank:
+        //  d/dt (U_w + U) = -dm_inj * h
         //  d/dt (m_w*u_w) + d/dt (m*u) = -dm_inj * h
         //  -dm_inj * h = dm_w*u_w + m_w*du_w
         //              + dm*u + m*du
@@ -784,7 +852,7 @@ static void step_state(implState* s, int i) {
         // Fuel mass and diameter change from rdot:
         dD_f = 2 * rr_rdot;
         dV_f = A_f * rr_rdot;
-        dm_reg = s->rho_f * dV_f;
+        dm_reg = PARAFFIN_rho * dV_f;
 
     // No fuel.
     } else {
@@ -796,7 +864,7 @@ static void step_state(implState* s, int i) {
 
     // Do nozzle flow.
     f64 dm_out;
-    if (P_c <= s->P_a) {
+    if (P_c >= s->P_a) {
         // Model the nozzle as an injector, using ideal compressible
         // flow and both choked and unchoked possibilities:
         f64 Pr_crit = pow(2 / (y_g + 1), y_g / (y_g - 1));
@@ -808,7 +876,7 @@ static void step_state(implState* s, int i) {
             Pterm = pow(Pr_rec, 2 / y_g) - pow(Pr_rec, (y_g + 1) / y_g);
             Pterm *= 2 / (y_g - 1);
         }
-        dm_out = s->Cd_nzl * s->A_nzl * P_c * sqrt(y_g / R_g / T_g * Pterm);
+        dm_out = s->Cd_nzl*s->A_nzl*P_c * sqrt(y_g / R_g / T_g * Pterm);
     } else {
         // Assume no flow through nozzle if no pressure ratio.
         dm_out = 0.0;
@@ -833,6 +901,9 @@ static void step_state(implState* s, int i) {
         // If ofr too low, our cea approxes dont work and there would be
         // very little comb anyway, so assume none.
         if (ofr < 0.5)
+            // Note that we should account for the properties of the vapourised
+            // fuel also, but i cannor be bothered and its essentially irrelevant
+            // since no combustion is happening the results arent very impactful.
             goto NO_COMBUSTION;
 
         // Do cea to find combustion properties.
@@ -844,20 +915,20 @@ static void step_state(implState* s, int i) {
       NO_COMBUSTION:;
 
         // No combustion but chamber gas changes due to oxidiser. Note this is
-        // assuming isothermal mass transfer, so using tank temperature but
-        // with current chamber pressure.
+        // assuming isothermal mass transfer, so using tank temperature but with
+        // current chamber pressure.
         T_n = T_t;
         Mw_n = NOX_Mw;
         cp_n = nox_cp(T_t, P_c);
 
     } else {
-        T_n = 0.0;
-        Mw_n = 0.0;
-        cp_n = 0.0;
+        // dm_n is 0 so any prop works.
+        T_n = 1.0;
+        Mw_n = 1.0;
+        cp_n = 1.0;
     }
 
-    // Change in any mass-specific property for a reservoir with
-    // flow in and out:
+    // Change in any mass-specific property for a reservoir with flow in and out:
     //  d/dt (m*p) = dm_in * p_in - dm_out * p
 
     // Change in moles:
@@ -878,9 +949,10 @@ static void step_state(implState* s, int i) {
     f64 dT_g = (dm_n * cp_n * T_n - dm_out * cp_g * T_g - dCp_g * T_g) / Cp_g;
 
 
-    // While I generally make a point not to use explicit euler
-    // (its just not it), this system performs poorly under other
-    // methods since it is not smooth. So, explicit euler it is.
+
+    // While I generally make a point not to use explicit euler (its just not
+    // it), this system performs poorly under other methods since it is not
+    // smooth. So, explicit euler it is.
     s->T_t[i]    = s->T_t[i - 1]    + Dt * dT_t;
     s->m_l[i]    = s->m_l[i - 1]    + Dt * dm_l;
     s->m_v[i]    = s->m_v[i - 1]    + Dt * dm_v;
@@ -893,6 +965,7 @@ static void step_state(implState* s, int i) {
 
 
 
+// DLL-exposed function.
 i32 sim_burn_impl(implState* s) {
     // Calculate initial state.
 
@@ -927,15 +1000,15 @@ i32 sim_burn_impl(implState* s) {
 
 
     // TODO: figure out what is considered the termination of the burn.
-    i64 count = 1; // init already set.
+    f64 time = 0.0;
+    i64 count = 1; // initial already set.
     while (count < s->max_count) { // dont buffer overflow.
+        if (time >= MAX_TIME)
+            break;
+
         step_state(s, count);
         count += 1;
-
-        // TODO: remove lmao.
-        i64 i = count - 1;
-        if (s->m_l[i] <= NEGLIGIBLE_MASS && (s->m_v[i] - s->m_v[i - 1] <= NEGLIGIBLE_MASS))
-            break;
+        time += Dt;
     }
     return count;
 }

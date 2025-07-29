@@ -7,14 +7,14 @@ typedef struct implState {
     // differentials) is:
     double* T_t;       // tank temperature
     double* m_l;       // tank liquid mass (happens to always be saturated)
-    double* m_v;       // tank vapour mass (only saturated if liquid mass > negligible)
+    double* m_v;       // tank vapour mass (only saturated if m_l > negligible)
     double* D_f;       // fuel grain inner diameter
     double* m_g;       // cc gas mass
     double* nmol_g;    // cc gas number of moles
     double* T_g;       // cc gas temperature
     double* Cp_g;      // cc gas constant pressure heat capacity
-    // This is enough to fully define the system at all times (when combined
-    // with other constant parameters).
+    // This is enough to fully define the system at all times (when combined with
+    // other constant parameters).
 
     int max_count;  // array length of ^ those time dep vars.
 
@@ -28,7 +28,6 @@ typedef struct implState {
     double A_inj;      // injector orifice area.
 
     double L_f;        // fuel length.
-    double rho_f;      // fuel density.
     double D0_f;       // initial fuel inner diameter.
 
     double D_c;        // cc diameter.
@@ -49,9 +48,9 @@ typedef struct implState {
 } implState;
 
 
-// Simulates the burn and returns how many elements of the
-// state arrays were used. Expected all members of `s` to
-// be set (but the array data will be overwritten).
+// Simulates the burn and returns how many elements of the state arrays were
+// used. Expected all members of `s` to be set (but the array data will be
+// overwritten).
 __declspec(dllexport) int sim_burn_impl(implState* s);
 
 

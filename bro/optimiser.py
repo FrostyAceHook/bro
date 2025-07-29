@@ -68,7 +68,6 @@ class Ingredient:
 
     def __init__(self, kind, name, composition, hf, rho):
         self.name = name
-        self.density = rho
 
         # use the same kind detection as nasa cea fortran code.
         if kind[:2] == "fu":
@@ -438,10 +437,11 @@ def simulate_burn(s):
     - cc_length
     - nozzle_exit_area
     """
-    _start_time = time.time()
 
     # Fuel and ox objects.
     assert s.fuox is PARAFFIN_NOX
+    fuel = s.fuox.fuel
+    ox = s.fuox.ox
 
     # Coupla cylinders.
     fuel_cyl = Cylinder.pipe(s.fuel_length, outer_diameter=s.cc_diameter)
@@ -450,19 +450,45 @@ def simulate_burn(s):
     tank_cyl = Cylinder.solid(s.tank_inner_length, tank_inner_diameter)
     cc_cyl = Cylinder.solid(s.cc_length, s.cc_diameter)
 
-
     # Coupla buffers.
-    T_t     = np.empty(100_000, dtype=np.float64)
-    m_l     = np.empty(100_000, dtype=np.float64)
-    m_v     = np.empty(100_000, dtype=np.float64)
-    D_f     = np.empty(100_000, dtype=np.float64)
-    m_g     = np.empty(100_000, dtype=np.float64)
-    nmol_g  = np.empty(100_000, dtype=np.float64)
-    T_g     = np.empty(100_000, dtype=np.float64)
-    Cp_g    = np.empty(100_000, dtype=np.float64)
+    T_t     = np.empty(1_000_000, dtype=np.float64)
+    m_l     = np.empty(1_000_000, dtype=np.float64)
+    m_v     = np.empty(1_000_000, dtype=np.float64)
+    D_f     = np.empty(1_000_000, dtype=np.float64)
+    m_g     = np.empty(1_000_000, dtype=np.float64)
+    nmol_g  = np.empty(1_000_000, dtype=np.float64)
+    T_g     = np.empty(1_000_000, dtype=np.float64)
+    Cp_g    = np.empty(1_000_000, dtype=np.float64)
+
+    # Coupla parameters.
+    V_t = tank_cyl.volume()
+
+    C_w = s.tank_wall_mass*s.tank_wall_specific_heat_capacity
+
+    vff0_o = s.ox_volume_fill_frac
+
+    Cd_inj = s.injector_discharge_coeff
+    A_inj = s.injector_orifice_area
+
+    L_f = fuel_cyl.length
+    D0_f = fuel_cyl.inner_diameter
+
+    D_c = cc_cyl.outer_diameter
+    eta_c = s.cc_combustion_efficiency
+    Vempty_c = cc_cyl.volume()
+
+    Cd_nzl = s.nozzle_discharge_coeff
+    A_nzl = s.nozzle_throat_area
+    eps_nzl = s.nozzle_exit_area / s.nozzle_throat_area
+
+    T_a = s.ambient_temperature
+    P_a = s.ambient_pressure
+    rho_a = s.ambient_density
+    Mw_a = s.ambient_molar_mass
+    cp_a = s.ambient_constant_pressure_specific_heat_capacity
 
     # Pack it up real nice for the sim.
-    state = sim_burn.pack_params(
+    state = sim_burn.State(
         T_t=T_t,
         m_l=m_l,
         m_v=m_v,
@@ -472,35 +498,36 @@ def simulate_burn(s):
         T_g=T_g,
         Cp_g=Cp_g,
 
-        V_t=tank_cyl.volume(),
+        V_t=V_t,
 
-        vff0_o=s.ox_volume_fill_frac,
+        C_w=C_w,
 
-        C_w=s.tank_wall_mass*s.tank_wall_specific_heat_capacity,
+        vff0_o=vff0_o,
 
-        Cd_inj=s.injector_discharge_coeff,
-        A_inj=s.injector_orifice_area,
+        Cd_inj=Cd_inj,
+        A_inj=A_inj,
 
-        L_f=fuel_cyl.length,
-        rho_f=s.fuox.fuel.density,
+        L_f=L_f,
+        D0_f=D0_f,
 
-        D_c=cc_cyl.outer_diameter,
-        eta_c=s.cc_combustion_efficiency,
-        Vempty_c=cc_cyl.volume(),
+        D_c=D_c,
+        eta_c=eta_c,
+        Vempty_c=Vempty_c,
 
-        Cd_nzl=s.nozzle_discharge_coeff,
-        A_nzl=s.nozzle_throat_area,
-        eps_nzl=s.nozzle_exit_area / s.nozzle_throat_area,
+        Cd_nzl=Cd_nzl,
+        A_nzl=A_nzl,
+        eps_nzl=eps_nzl,
 
-        T_a=s.ambient_temperature,
-        P_a=s.ambient_pressure,
-        rho_a=s.ambient_density,
-        Mw_a=s.ambient_molar_mass,
-        cp_a=s.ambient_constant_pressure_specific_heat_capacity,
+        T_a=T_a,
+        P_a=P_a,
+        rho_a=rho_a,
+        Mw_a=Mw_a,
+        cp_a=cp_a,
     )
-
     # Send it.
-    count = sim_burn.sim_burn(state)
+    _start_time = time.time()
+    count = state.sim()
+    print(f"Finished burn sim in {time.time() - _start_time:.3g}s")
 
     # Trim unused memory.
     T_t     = T_t[:count]
@@ -511,9 +538,12 @@ def simulate_burn(s):
     nmol_g  = nmol_g[:count]
     T_g     = T_g[:count]
     Cp_g    = Cp_g[:count]
-    print(T_t)
 
-    print(f"Finished burn sim in {time.time() - _start_time:.2f}s")
+
+    # Yoink some constants from the sim (hardcode skul lemoji).
+    GAS_CONSTANT = 8.31446261815324
+    Dt = 0.001
+    NEGLIGIBLE_MASS = 0.001
 
 
     def diffarr(x):
@@ -524,7 +554,7 @@ def simulate_burn(s):
         return Dx
 
 
-    s.burn_time = (len(T_t) - 1) * 0.001
+    s.burn_time = (len(T_t) - 1) * Dt
     t = np.linspace(0, s.burn_time, len(T_t))
     mask = np.ones(len(t), dtype=bool)
     # mask = (t <= 0.1)
@@ -532,67 +562,67 @@ def simulate_burn(s):
 
     # Reconstruct a bunch of dependant state.
 
-    # V_f = L_f * pi / 4 * (D_c**2 - D_f**2)
-    # V_c = Vempty_c - V_f
+    V_f = L_f * pi / 4 * (D_c**2 - D_f**2)
+    V_c = Vempty_c - V_f
 
-    # m_f = rho_f * V_f
+    m_f = V_f * 924.5 # paraffin density :)
 
-    # Dm_inj = -diffarr(m_l + m_v)
-    # Dm_reg = -diffarr(m_f)
-    # Dm_g = diffarr(m_g)
+    Dm_inj = -diffarr(m_l + m_v)
+    Dm_reg = -diffarr(m_f)
+    Dm_g = diffarr(m_g)
 
-    # P_t = np.zeros(len(T_t), dtype=float)
-    # # saturated pressure:
-    # Pmask = (m_l > negligible_mass)
-    # Psat = [ox.prop("P", "T", T, "Q", 0) for T in T_t[Pmask]]
-    # P_t[Pmask] = Psat
-    # # not:
-    # Pmask = ~Pmask & (m_v > negligible_mass)
-    # Pnot = [ox.prop("P", "T", T, "D", m / V_t) for T, m in zip(T_t[Pmask], m_v[Pmask])]
-    # P_t[Pmask] = Pnot
+    P_t = np.zeros(len(T_t), dtype=float)
+    # saturated pressure:
+    Pmask = (m_l > NEGLIGIBLE_MASS)
+    Psat = [ox.prop("P", "T", T, "Q", 0) for T in T_t[Pmask]]
+    P_t[Pmask] = Psat
+    # not:
+    Pmask = ~Pmask & (m_v > NEGLIGIBLE_MASS)
+    Pnot = [ox.prop("P", "T", T, "D", m / V_t) for T, m in zip(T_t[Pmask], m_v[Pmask])]
+    P_t[Pmask] = Pnot
 
-    # ofr = np.zeros(len(T_t), dtype=float)
-    # ofr_mask = (Dm_reg != 0)
-    # ofr[ofr_mask] = Dm_inj[ofr_mask] / Dm_reg[ofr_mask]
-    # ofr[~ofr_mask] = 0.0
+    ofr = np.zeros(len(T_t), dtype=float)
+    ofr_mask = (Dm_reg != 0)
+    ofr[ofr_mask] = Dm_inj[ofr_mask] / Dm_reg[ofr_mask]
+    ofr[~ofr_mask] = 0.0
 
-    # R_g = GAS_CONSTANT/(m_g / nmol_g)
+    R_g = GAS_CONSTANT/(m_g / nmol_g)
 
-    # P_c = R_g * T_g * m_g / V_c
+    P_c = R_g * T_g * m_g / V_c
 
 
-    # dm_out = (Dm_inj + Dm_reg - Dm_g) / Dt
+    dm_out = (Dm_inj + Dm_reg - Dm_g) / Dt
 
-    # cp_g = Cp_g / m_g
-    # y_g = cp_g / (cp_g - R_g)
+    cp_g = Cp_g / m_g
+    y_g = cp_g / (cp_g - R_g)
 
 
     s.ox_mass_liquid = m_l
     s.ox_mass_vapour = m_v
     s.ox_mass = m_l + m_v
-    # s.fuel_mass = m_f
+    s.fuel_mass = m_f
     s.tank_temperature = T_t
-    # s.tank_pressure = P_t
-    # s.cc_pressure = P_c
+    s.tank_pressure = P_t
+    s.cc_pressure = P_c
 
     plotme = [
         # data, title, ylabel, y_lower_limit_as_zero
-        # (s.tank_pressure, "Tank pressure", "Pressure [Pa]", False),
-        # (s.cc_pressure, "CC pressure", "Pressure [Pa]", False),
+        (s.tank_pressure, "Tank pressure", "Pressure [Pa]", False),
+        (s.cc_pressure, "CC pressure", "Pressure [Pa]", False),
         (s.tank_temperature - 273.15, "Tank temperature", "Temperature [dC]", False),
-        # (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
-        # (Dm_inj / Dt, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
-        # (Dm_reg / Dt, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
+        (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
+        (Dm_inj / Dt, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
+        (Dm_reg / Dt, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
         (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]", True),
-        # (s.fuel_mass, "Fuel mass", "Mass [kg]", True),
+        (s.fuel_mass, "Fuel mass", "Mass [kg]", True),
         # (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]", True),
         # (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]", True),
         (m_g, "Gas mass", "ceebs", False),
         (T_g, "Gas temp", "ceebs", False),
         (nmol_g, "Gas number of moles", "ceebs", False),
         (Cp_g / m_g, "Gas cp", "ceebs", False),
-        # (dm_out, "Gas exit", "ceebs", False),
-        # (y_g, "Gas gamma", "ceebs", False),
+        (dm_out, "Gas exit", "ceebs", False),
+        (y_g, "Gas gamma", "ceebs", False),
     ]
     def doplot(plotme):
         plt.figure()

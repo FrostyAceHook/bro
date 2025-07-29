@@ -47,9 +47,9 @@ cimport numpy as np
 np.import_array()
 
 
-cdef class pack_params:
+cdef class State:
     cdef implState obj
-    def __cinit__(self, *,
+    def __cinit__(State self, *,
                 np.ndarray[np.float64_t, mode="c"] T_t,
                 np.ndarray[np.float64_t, mode="c"] m_l,
                 np.ndarray[np.float64_t, mode="c"] m_v,
@@ -59,12 +59,12 @@ cdef class pack_params:
                 np.ndarray[np.float64_t, mode="c"] T_g,
                 np.ndarray[np.float64_t, mode="c"] Cp_g,
                 double V_t,
-                double vff0_o,
                 double C_w,
+                double vff0_o,
                 double Cd_inj,
                 double A_inj,
                 double L_f,
-                double rho_f,
+                double D0_f,
                 double D_c,
                 double eta_c,
                 double Vempty_c,
@@ -91,12 +91,12 @@ cdef class pack_params:
                 T_g.size, Cp_g.size
             )
         self.obj.V_t = V_t
-        self.obj.vff0_o = vff0_o
         self.obj.C_w = C_w
+        self.obj.vff0_o = vff0_o
         self.obj.Cd_inj = Cd_inj
         self.obj.A_inj = A_inj
         self.obj.L_f = L_f
-        self.obj.rho_f = rho_f
+        self.obj.D0_f = D0_f
         self.obj.D_c = D_c
         self.obj.eta_c = eta_c
         self.obj.Vempty_c = Vempty_c
@@ -109,5 +109,5 @@ cdef class pack_params:
         self.obj.Mw_a = Mw_a
         self.obj.cp_a = cp_a
 
-def sim_burn(pack_params params):
-    return int(sim_burn_impl(&params.obj))
+    def sim(State self):
+        return int(sim_burn_impl(&self.obj))
