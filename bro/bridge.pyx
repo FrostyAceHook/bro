@@ -1,7 +1,7 @@
 # man get me into c as quickly as possible.
 
-cdef extern from "sim_burn_impl.h":
-    cdef struct implState:
+cdef extern from "sim.h":
+    cdef struct broState:
         double* T_t;
         double* m_l;
         double* m_v;
@@ -40,7 +40,7 @@ cdef extern from "sim_burn_impl.h":
         double cp_a;
 
 
-    int sim_burn_impl(implState* s)
+    int bro_sim(broState* s)
 
 import numpy as np
 cimport numpy as np
@@ -48,7 +48,7 @@ np.import_array()
 
 
 cdef class State:
-    cdef implState obj
+    cdef broState obj
     def __cinit__(State self, *,
                 np.ndarray[np.float64_t, mode="c"] T_t,
                 np.ndarray[np.float64_t, mode="c"] m_l,
@@ -110,4 +110,4 @@ cdef class State:
         self.obj.cp_a = cp_a
 
     def sim(State self):
-        return int(sim_burn_impl(&self.obj))
+        return int(bro_sim(&self.obj))

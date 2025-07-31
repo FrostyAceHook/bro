@@ -1,6 +1,6 @@
 // c my beloved.
 
-#include "sim_burn_impl.h"
+#include "sim.h"
 
 #include <assert.h>
 #include <math.h>
@@ -76,7 +76,7 @@ static f64 tube_vol(f64 L, f64 ID, f64 OD) {
 
 
 // Nitrous oxide properties from CoolProp, approximated via rational polynomials
-// by 'bro/func_approx.py'.
+// by 'bro/approximator.py'.
 
 // All nox properties are only valid for saturated liquid-vapour mixtures
 // (including qualities of exactly 0 or 1), and vapour. Note the whats up
@@ -380,7 +380,7 @@ BR_LOOKSIE static f64 nox_Z(f64 T, f64 rho) {
 
 
 // Paraffin+NOx CEA results from rocketcea, approximated via rational polynomials
-// by 'bro/func_approx.py'.
+// by 'bro/approximator.py'.
 
 // For the bounds of the inputs, we use:
 //  chamber pressure  90 kPa .. 7.2 Mpa
@@ -564,7 +564,7 @@ BR_LOOKSIE static f64 cea_Mw(f64 P, f64 ofr) {
 
 // Implements one integration step of the system (where `i` is the set-count of
 // the time-dependant arrays).
-static void step_state(implState* s, int i) {
+static void step_state(broState* s, int i) {
 
     // Current state variables.
     f64 T_t = s->T_t[i - 1];
@@ -898,8 +898,8 @@ static void step_state(implState* s, int i) {
         // Instantaneous oxidiser-fuel ratio.
         f64 ofr = dm_inj / dm_reg;
 
-        // If ofr too low, our cea approxes dont work and there would be
-        // very little comb anyway, so assume none.
+        // If ofr too low, our cea approxes dont work and there would be very
+        // little comb anyway, so assume none.
         if (ofr < 0.5)
             // Note that we should account for the properties of the vapourised
             // fuel also, but i cannor be bothered and its essentially irrelevant
@@ -966,7 +966,7 @@ static void step_state(implState* s, int i) {
 
 
 // DLL-exposed function.
-i32 sim_burn_impl(implState* s) {
+i32 bro_sim(broState* s) {
     // Calculate initial state.
 
     // Assuming ox tank at ambient temperature and a saturated mixture.
@@ -1001,7 +1001,7 @@ i32 sim_burn_impl(implState* s) {
 
     // TODO: figure out what is considered the termination of the burn.
     f64 time = 0.0;
-    i64 count = 1; // initial already set.
+    i32 count = 1; // initial already set.
     while (count < s->max_count) { // dont buffer overflow.
         if (time >= MAX_TIME)
             break;

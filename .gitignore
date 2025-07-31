@@ -5,9 +5,9 @@
 
 build/
 
-bro/sim_burn.*
-!bro/sim_burn.pyx
+bro/bridge.*
+!bro/bridge.pyx
 
-bro/sim_burn_impl.*
-!bro/sim_burn_impl.c
-!bro/sim_burn_impl.h
+bro/sim.*
+!bro/sim.c
+!bro/sim.h

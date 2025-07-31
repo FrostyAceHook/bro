@@ -1,8 +1,8 @@
-#ifndef SIM_BURN_IMPL_H_
-#define SIM_BURN_IMPL_H_
+#ifndef SIM_H_
+#define SIM_H_
 
 
-typedef struct implState {
+typedef struct broState {
     // Tracked state (all of which changes over time and are described by
     // differentials) is:
     double* T_t;       // tank temperature
@@ -45,13 +45,13 @@ typedef struct implState {
     double cp_a;       // ambient constant pressure specific heat capacity.
 
     // NOTE: any changes to this must be reflected in the cython wrapping class.
-} implState;
+} broState;
 
 
 // Simulates the burn and returns how many elements of the state arrays were
 // used. Expected all members of `s` to be set (but the array data will be
 // overwritten).
-__declspec(dllexport) int sim_burn_impl(implState* s);
+__declspec(dllexport) int bro_sim(broState* s);
 
 
 #endif

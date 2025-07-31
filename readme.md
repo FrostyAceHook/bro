@@ -6,12 +6,13 @@ Optimises several parameters of a hybrid rocket motor to achieve the highest sco
 Requires:
 - numpy
 - matplotlib
-- coolprop (to do func_approx)
-- rocketcea (to do func_approx)
+- scipy (if running 'bro.approximator')
+- coolprop
+- rocketcea
 - setuptools
-- cython
+- cython (+msvc unless u can find the option to use mingw)
 - mingw32 gcc
 
 To run:
-1. `compile.bat` to generate the sim dll.
-2. `py -m bro` to run the entire module.
+1. `compile.bat` to build the sim dll and bridge cython module.
+2. `py -m bro` to run the entire thing.

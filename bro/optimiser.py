@@ -8,7 +8,7 @@ import rocketcea
 from CoolProp.CoolProp import PropsSI
 from rocketcea.cea_obj_w_units import CEA_Obj
 
-from . import sim_burn
+from . import bridge
 
 
 
@@ -488,7 +488,7 @@ def simulate_burn(s):
     cp_a = s.ambient_constant_pressure_specific_heat_capacity
 
     # Pack it up real nice for the sim.
-    state = sim_burn.State(
+    state = bridge.State(
         T_t=T_t,
         m_l=m_l,
         m_v=m_v,

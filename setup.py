@@ -16,9 +16,9 @@ def main():
 
     try:
         ext = Extension(
-            "bro.sim_burn",
-            sources=["bro/sim_burn.pyx"],
-            libraries=["sim_burn_impl"],
+            "bro.bridge",
+            sources=["bro/bridge.pyx"],
+            libraries=["sim"],
             library_dirs=["bro"],
             include_dirs=["bro", np.get_include()],
         )
