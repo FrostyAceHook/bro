@@ -32,14 +32,15 @@
 typedef struct broState {
     // Tracked state (all of which changes over time and are described by
     // differentials) is:
-    double* T_t;       // tank temperature
-    double* m_l;       // tank liquid mass (happens to always be saturated)
-    double* m_v;       // tank vapour mass (only saturated if m_l > negligible)
-    double* D_f;       // fuel grain inner diameter
-    double* m_g;       // cc gas mass
-    double* nmol_g;    // cc gas number of moles
-    double* T_g;       // cc gas temperature
-    double* Cp_g;      // cc gas constant pressure heat capacity
+    double* t;         // time.
+    double* T_t;       // tank temperature.
+    double* m_l;       // tank liquid mass (happens to always be saturated).
+    double* m_v;       // tank vapour mass (only saturated if m_l > negligible).
+    double* D_f;       // fuel grain inner diameter.
+    double* m_g;       // cc gas mass.
+    double* nmol_g;    // cc gas number of moles.
+    double* T_g;       // cc gas temperature.
+    double* Cp_g;      // cc gas constant pressure heat capacity.
     // This is enough to fully define the system at all times (when combined with
     // other constant parameters).
 

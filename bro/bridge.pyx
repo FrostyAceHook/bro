@@ -2,6 +2,7 @@
 
 cdef extern from "sim.h":
     cdef struct broState:
+        double* t;
         double* T_t;
         double* m_l;
         double* m_v;
@@ -52,6 +53,7 @@ np.import_array()
 cdef class State:
     cdef broState obj
     def __cinit__(State self, *,
+                np.ndarray[np.float64_t, mode="c"] t,
                 np.ndarray[np.float64_t, mode="c"] T_t,
                 np.ndarray[np.float64_t, mode="c"] m_l,
                 np.ndarray[np.float64_t, mode="c"] m_v,
@@ -79,6 +81,7 @@ cdef class State:
                 double Mw_a,
                 double cp_a,
             ):
+        self.obj.t      = <double*>t.data
         self.obj.T_t    = <double*>T_t.data
         self.obj.m_l    = <double*>m_l.data
         self.obj.m_v    = <double*>m_v.data
@@ -89,9 +92,9 @@ cdef class State:
         self.obj.Cp_g   = <double*>Cp_g.data
         self.obj.upto = <int>0
         self.obj.count = <int>min(
-                T_t.size, m_l.size, m_v.size,
-                D_f.size, m_g.size, nmol_g.size,
-                T_g.size, Cp_g.size
+                t.size, T_t.size, m_l.size,
+                m_v.size, D_f.size, m_g.size,
+                nmol_g.size, T_g.size, Cp_g.size,
             )
         self.obj.V_t = V_t
         self.obj.C_w = C_w

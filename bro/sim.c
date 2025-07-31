@@ -746,6 +746,7 @@ local void initial_state(broState* s) {
     f64 Cp0_g = m0_g * s->cp_a;
 
     // Chuck into the state.
+    s->t[0] = 0.0;
     s->T_t[0] = T0_t;
     s->m_l[0] = m0_l;
     s->m_v[0] = m0_v;
@@ -1167,44 +1168,33 @@ local void step_state(broState* s) {
             /* draining <5% each step and not close to cutoff. */       \
             ((m) > 10*NEGLIGIBLE_MASS && br_fabs(20*Dt*(dm)) <= (m))    \
         )
-    #define STABLE_FLOW_NONNEGLIGIBLE(m, dm) (  \
-            /* just draining <5% each step. */  \
-            (br_fabs(20*Dt*(dm)) <= (m))        \
+    #define STABLE_FLOW_NEVER_NEGLIGIBLE(m, dm) (   \
+            /* just draining <5% each step. */      \
+            (br_fabs(20*Dt*(dm)) <= (m))            \
         )
     i32 gotime = 1;
     gotime &= (s->upto * Dt > STARTUP_TIME); // dont risk startup being gotimed.
     gotime &= STABLE_FLOW(m_l, dm_l);
     gotime &= STABLE_FLOW(m_v, dm_v);
     gotime &= STABLE_FLOW(m_f, -dm_reg);
-    gotime &= STABLE_FLOW_NONNEGLIGIBLE(m_g, dm_g);
+    gotime &= STABLE_FLOW_NEVER_NEGLIGIBLE(m_g, dm_g);
 
     i32 steps = 1;
     if (gotime) // GOTIME.
         steps = GOTIME_STEPS;
-    if (steps > s->count - s->upto) // dont overflow.
-        steps = s->count - s->upto;
 
-    // Assume constant first derivative over all steps.
-    f64 DT_t    = Dt * dT_t;
-    f64 Dm_l    = Dt * dm_l;
-    f64 Dm_v    = Dt * dm_v;
-    f64 DD_f    = Dt * dD_f;
-    f64 Dm_g    = Dt * dm_g;
-    f64 Dnmol_g = Dt * dnmol_g;
-    f64 DT_g    = Dt * dT_g;
-    f64 DCp_g   = Dt * dCp_g;
-    while (steps --> 0) { // down-to operator best operator.
-        // Forward euler integrate.
-        s->T_t[s->upto]    = s->T_t[s->upto - 1]    + DT_t;
-        s->m_l[s->upto]    = s->m_l[s->upto - 1]    + Dm_l;
-        s->m_v[s->upto]    = s->m_v[s->upto - 1]    + Dm_v;
-        s->D_f[s->upto]    = s->D_f[s->upto - 1]    + DD_f;
-        s->m_g[s->upto]    = s->m_g[s->upto - 1]    + Dm_g;
-        s->nmol_g[s->upto] = s->nmol_g[s->upto - 1] + Dnmol_g;
-        s->T_g[s->upto]    = s->T_g[s->upto - 1]    + DT_g;
-        s->Cp_g[s->upto]   = s->Cp_g[s->upto - 1]   + DCp_g;
-        ++s->upto;
-    }
+    // Assume constant first derivative over all steps and perform forward euler
+    // integration.
+    s->t[s->upto]      = s->t[s->upto - 1]      + steps * Dt;
+    s->T_t[s->upto]    = s->T_t[s->upto - 1]    + steps * Dt * dT_t;
+    s->m_l[s->upto]    = s->m_l[s->upto - 1]    + steps * Dt * dm_l;
+    s->m_v[s->upto]    = s->m_v[s->upto - 1]    + steps * Dt * dm_v;
+    s->D_f[s->upto]    = s->D_f[s->upto - 1]    + steps * Dt * dD_f;
+    s->m_g[s->upto]    = s->m_g[s->upto - 1]    + steps * Dt * dm_g;
+    s->nmol_g[s->upto] = s->nmol_g[s->upto - 1] + steps * Dt * dnmol_g;
+    s->T_g[s->upto]    = s->T_g[s->upto - 1]    + steps * Dt * dT_g;
+    s->Cp_g[s->upto]   = s->Cp_g[s->upto - 1]   + steps * Dt * dCp_g;
+    ++s->upto;
 }
 
 

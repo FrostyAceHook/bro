@@ -451,6 +451,7 @@ def simulate_burn(s):
     cc_cyl = Cylinder.solid(s.cc_length, s.cc_diameter)
 
     # Coupla buffers.
+    t       = np.empty(1_000_000, dtype=np.float64)
     T_t     = np.empty(1_000_000, dtype=np.float64)
     m_l     = np.empty(1_000_000, dtype=np.float64)
     m_v     = np.empty(1_000_000, dtype=np.float64)
@@ -489,6 +490,7 @@ def simulate_burn(s):
 
     # Pack it up real nice for the sim.
     state = bridge.State(
+        t=t,
         T_t=T_t,
         m_l=m_l,
         m_v=m_v,
@@ -530,6 +532,7 @@ def simulate_burn(s):
     print(f"Finished burn sim in {time.time() - _start_time:.3g}s")
 
     # Trim unused memory.
+    t       = t[:count]
     T_t     = T_t[:count]
     m_l     = m_l[:count]
     m_v     = m_v[:count]
@@ -546,16 +549,21 @@ def simulate_burn(s):
     NEGLIGIBLE_MASS = 0.001
 
 
-    def diffarr(x):
+    def Delta(x):
         if len(x) == 1:
             return np.array([0.0])
         Dx = np.diff(x)
         Dx = np.append(Dx, Dx[-1])
         return Dx
+    def diff(x):
+        if len(x) == 1:
+            return np.array([0.0])
+        dx = np.diff(x) / np.diff(t)
+        dx = np.append(dx, dx[-1])
+        return dx
 
 
-    s.burn_time = (len(T_t) - 1) * Dt
-    t = np.linspace(0, s.burn_time, len(T_t))
+    s.burn_time = t[-1]
     mask = np.ones(len(t), dtype=bool)
     # mask = (t <= 0.1)
 
@@ -567,9 +575,13 @@ def simulate_burn(s):
 
     m_f = V_f * 924.5 # paraffin density :)
 
-    Dm_inj = -diffarr(m_l + m_v)
-    Dm_reg = -diffarr(m_f)
-    Dm_g = diffarr(m_g)
+    Dm_inj = -Delta(m_l + m_v)
+    Dm_reg = -Delta(m_f)
+    Dm_g = Delta(m_g)
+
+    dm_inj = -diff(m_l + m_v)
+    dm_reg = -diff(m_f)
+    dm_g = diff(m_g)
 
     P_t = np.zeros(len(T_t), dtype=float)
     # saturated pressure:
@@ -591,7 +603,7 @@ def simulate_burn(s):
     P_c = R_g * T_g * m_g / V_c
 
 
-    dm_out = (Dm_inj + Dm_reg - Dm_g) / Dt
+    dm_out = dm_inj + dm_reg - dm_g
 
     cp_g = Cp_g / m_g
     y_g = cp_g / (cp_g - R_g)
@@ -611,8 +623,8 @@ def simulate_burn(s):
         (s.cc_pressure, "CC pressure", "Pressure [Pa]", False),
         (s.tank_temperature - 273.15, "Tank temperature", "Temperature [dC]", False),
         (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
-        (Dm_inj / Dt, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
-        (Dm_reg / Dt, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
+        (dm_inj, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
+        (dm_reg, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
         (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]", True),
         (s.fuel_mass, "Fuel mass", "Mass [kg]", True),
         # (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]", True),
