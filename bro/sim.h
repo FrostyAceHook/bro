@@ -2,6 +2,33 @@
 #define SIM_H_
 
 
+// For discussing maths, cop a legend (shoutout charle):
+//
+// X0 = initial
+// dX = time derivative
+// DX = discrete change
+//
+// X_l = ox liquid
+// X_v = ox vapour
+// X_o = ox anywhere
+// X_f = fuel
+// X_g = cc gases
+// X_n = new cc gases
+//
+// X_t = tank
+// X_c = cc
+// X_w = tank wall (for heat sink)
+// X_a = ambient
+//
+// X_inj = injector
+// X_u = upstream (tank-side of injector)
+// X_d = downstream (cc-side of injector)
+//
+// X_nzl = nozzle
+//
+// X_reg = regression (fuel erosion/vapourisation)
+
+
 typedef struct broState {
     // Tracked state (all of which changes over time and are described by
     // differentials) is:
@@ -16,7 +43,8 @@ typedef struct broState {
     // This is enough to fully define the system at all times (when combined with
     // other constant parameters).
 
-    int max_count;  // array length of ^ those time dep vars.
+    int upto; // current length of ^ those time dep var arrays.
+    int count; // maximum length of ^ those time dep var arrays.
 
     double V_t;        // tank volume.
 
@@ -51,7 +79,7 @@ typedef struct broState {
 // Simulates the burn and returns how many elements of the state arrays were
 // used. Expected all members of `s` to be set (but the array data will be
 // overwritten).
-__declspec(dllexport) int bro_sim(broState* s);
+__declspec(dllexport) void bro_sim(broState* s);
 
 
 #endif

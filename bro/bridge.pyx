@@ -10,7 +10,9 @@ cdef extern from "sim.h":
         double* nmol_g;
         double* T_g;
         double* Cp_g;
-        int max_count;
+
+        int upto;
+        int count;
 
         double V_t;
 
@@ -40,7 +42,7 @@ cdef extern from "sim.h":
         double cp_a;
 
 
-    int bro_sim(broState* s)
+    void bro_sim(broState* s)
 
 import numpy as np
 cimport numpy as np
@@ -85,7 +87,8 @@ cdef class State:
         self.obj.nmol_g = <double*>nmol_g.data
         self.obj.T_g    = <double*>T_g.data
         self.obj.Cp_g   = <double*>Cp_g.data
-        self.obj.max_count = <int>min(
+        self.obj.upto = <int>0
+        self.obj.count = <int>min(
                 T_t.size, m_l.size, m_v.size,
                 D_f.size, m_g.size, nmol_g.size,
                 T_g.size, Cp_g.size
@@ -110,4 +113,8 @@ cdef class State:
         self.obj.cp_a = cp_a
 
     def sim(State self):
-        return int(bro_sim(&self.obj))
+        bro_sim(&self.obj)
+        # Keep how many elements it used, then reset.
+        count = int(self.obj.upto)
+        self.obj.upto = <int>0
+        return count
