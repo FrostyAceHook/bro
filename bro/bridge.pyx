@@ -117,7 +117,4 @@ cdef class State:
 
     def sim(State self):
         bro_sim(&self.obj)
-        # Keep how many elements it used, then reset.
-        count = int(self.obj.upto)
-        self.obj.upto = <int>0
-        return count
+        return int(self.obj.upto)

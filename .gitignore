@@ -1,13 +1,16 @@
 **/.*
 !.gitignore
 
-**/__pycache__
+__pycache__/
 
-build/
+/build/
 
-bro/bridge.*
-!bro/bridge.pyx
+/bro/bridge.*
+!/bro/bridge.pyx
 
-bro/sim.*
-!bro/sim.c
-!bro/sim.h
+/bro/sim.*
+!/bro/sim.c
+!/bro/sim.h
+
+/bro/approximator_cea_cache.npz
+/bro/approximator_cea_cache.lock

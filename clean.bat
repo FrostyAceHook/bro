@@ -27,6 +27,15 @@ for %%F in (.\bro\bridge.*) do (
     )
 )
 
+if exist ".\bro\approximator_cea_cache.npz" (
+    echo Deleting file: .\bro\approximator_cea_cache.npz
+    del /F /Q ".\bro\approximator_cea_cache.npz"
+)
+if exist ".\bro\approximator_cea_cache.lock" (
+    echo Deleting file: .\bro\approximator_cea_cache.lock
+    del /F /Q ".\bro\approximator_cea_cache.lock"
+)
+
 @echo ON
 @endlocal
 @popd

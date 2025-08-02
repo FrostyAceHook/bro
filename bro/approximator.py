@@ -1,14 +1,51 @@
 """
-Helpers to create function approximations.
+Helpers to create function approximations (for static use, not dynamically).
+Creates a c snippet which takes some number of floating-point arguments and
+calculates a single floating-point return.
 """
 
+import contextlib
 import functools
 import itertools
 import math
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy
+import CEA_Wrap
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+
+class FileLock:
+    def __init__(self, filename):
+        self.filename = filename
+        self.handle = None
+
+    def __enter__(self):
+        self.handle = open(self.filename, "a+")
+        try:
+            if os.name == "nt":
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_LOCK, 0x7fff_ffff)
+            else:
+                fcntl.flock(self.handle, fcntl.LOCK_EX)
+        except:
+            self.handle.close()
+            raise
+        return self.handle
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if os.name == 'nt':
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 0x7fff_ffff)
+            else:
+                fcntl.flock(self.handle, fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
 
 
 @functools.cache
@@ -256,7 +293,8 @@ class RationalPolynomial:
                 del self.q.coeffs
             raise
 
-    def _error(self, real, span, approx, maximum=True, noabserr=False):
+    @staticmethod
+    def _error(real, span, approx, maximum=True, noabserr=False):
         relative = np.abs((approx - real) / span)
         absolute = np.abs(approx / real - 1)
         if noabserr:
@@ -421,8 +459,8 @@ class RationalPolynomial:
         span = np.max(real) - np.min(real)
 
         padto = 55
-        N = 6
-        onesN = yup_all_ones(N, *flatcoords)
+        N = max(1, 6 // dims)
+        ones = yup_all_ones(N, *flatcoords)
 
         if spec is None:
             idxs = cls._all_idx_tuples(dims, blitz=blitz, starting_cost=starting_cost)
@@ -435,10 +473,9 @@ class RationalPolynomial:
         for pidxs, qidxs in idxs:
             self = cls(dims, pidxs, qidxs)
             maxdegree = max(self.p.degree, self.q.degree)
-            if maxdegree <= N:
-                ones = onesN
-            else:
-                ones = yup_all_ones(maxdegree, *flatcoords)
+            if maxdegree > N:
+                N = maxdegree
+                ones = yup_all_ones(N, *flatcoords)
 
             s = f"{pidxs} / {qidxs}"
             s += " " * (padto - len(s))
@@ -457,7 +494,7 @@ class RationalPolynomial:
     def __repr__(self, short=True):
         return f"({self.p.__repr__(short)}) / ({self.q.__repr__(short)})"
 
-    def cython(self):
+    def code(self):
         assert self.dims <= 3
         p = self.p
         q = self.q
@@ -556,6 +593,25 @@ class RationalPolynomial:
 
 
 
+class LUT:
+    def __init__(self, *spaces):
+        self.ndim = len(spaces)
+        assert all(len(x) == 3 for x in spaces)
+        self.N = [x[2] for x in spaces]
+        self.axes = [np.linspace(*space) for space in spaces]
+        self.data = np.empty(self.N, dtype=float)
+
+    def match(self, f):
+        for ijk, point in zip(np.ndindex(*self.N), itertools.product(*self.axes)):
+            self.data[ijk] = f(*point)
+        self._interp = scipy.interpolate.RegularGridInterpolator(self.axes, self.data)
+
+    def __call__(self, *points):
+        points = np.broadcast_arrays(*points)
+        points = np.vstack(points).T
+        return self._interp(points)
+
+
 
 def concspace(lo, conc, hi, N, strength=1.0):
     if strength == 0.0:
@@ -620,8 +676,9 @@ def do(func, X, Y=None, maskf=None, plotme=True, **of_kwargs):
         ratpoly.havealook(realfine, *fines, mask=maskfine, figtitle=func.__name__,
                 noabserr=noabserr)
     print(func.__name__, "->", ratpoly)
-    print(ratpoly.cython())
+    print(ratpoly.code())
     print()
+
 def peek1d(func, X):
     Y = func(X)
     fig = plt.figure(figsize=(8, 5))
@@ -629,8 +686,8 @@ def peek1d(func, X):
     ax = fig.add_subplot(1, 1, 1)
     ax.plot(X, Y)
     plt.tight_layout()
-    plt.show()
-def peek(func, X, Y, maskf=None):
+
+def peek2d(func, X, Y, maskf=None):
     Z = func(X.ravel(), Y.ravel()).reshape(X.shape)
     if maskf is not None:
         Z[~maskf(X, Y)] = np.nan
@@ -640,13 +697,30 @@ def peek(func, X, Y, maskf=None):
     cont = ax.contourf(X, Y, Z, levels=100, cmap="viridis")
     fig.colorbar(cont, ax=ax)
     plt.tight_layout()
-    plt.show()
-def compare(X, Y, realf, approxf):
-    real = realf(X, Y)
-    approx = approxf(X, Y)
-    err = 100 * np.abs(real / approx - 1.0)
+
+def peek3d(*args):
     fig = plt.figure(figsize=(8, 5))
-    for i, data in enumerate([real, approx, err]):
+    for i, (func, X, Y) in enumerate(args):
+        Z = func(X.ravel(), Y.ravel()).reshape(X.shape)
+        Z[Z < 0] = 0.0
+        ax = fig.add_subplot(len(args), 1, 1 + i)
+        cont = ax.contourf(X, Y, Z, levels=100, cmap="viridis")
+        ax.set_title(func.__name__)
+        fig.colorbar(cont, ax=ax)
+    plt.tight_layout()
+
+def compare2d(X, Y, realf, approxf, trim_corners=False):
+    real = realf(X, Y)
+    span = np.max(real) - np.min(real)
+    approx = approxf(X, Y)
+    error = 100 * RationalPolynomial._error(real, span, approx, maximum=False)
+    if trim_corners:
+        for idx in [(0,0), (0,-1), (-1,0), (-1,-1)]:
+            real[idx] = np.nan
+            approx[idx] = np.nan
+            error[idx] = np.nan
+    fig = plt.figure(figsize=(8, 5))
+    for i, data in enumerate([real, approx, error]):
         ax = fig.add_subplot(1, 3, 1 + i)
         cont = ax.contourf(X, Y, data, levels=100, cmap="viridis")
         fig.colorbar(cont, ax=ax)
@@ -729,7 +803,7 @@ def nox():
 
     def nox_P(T, rho):
         return PropsSI("P", "T", T, "D", rho, "N2O")
-    # peek(nox_P, *nox_in_Trho())
+    # peek2d(nox_P, *nox_in_Trho())
     # do(nox_P, *nox_in_Trho())
     do(nox_P, *nox_in_Trho(), spec=[(5, 7, 9), (1,)])
 
@@ -747,7 +821,7 @@ def nox():
     def nox_cp(T, P):
         return PropsSI("C", "T", T, "P", P * 1e6, "N2O")
     # idk wtf is happening around the critical point for this but its cooked.
-    # peek(nox_cp, *nox_in_TP(N=300, trim_corner=True))
+    # peek2d(nox_cp, *nox_in_TP(N=300, trim_corner=True))
     # do(nox_cp, *nox_in_TP(N=140, trim_corner=True), blitz=1.0)
     do(nox_cp, *nox_in_TP(N=140, trim_corner=True), spec=[(1, 2, 3), (1, 2, 3, 5)])
 
@@ -762,7 +836,7 @@ def nox():
 
     def nox_cv(T, P):
         return PropsSI("O", "T", T, "P", P * 1e6, "N2O")
-    # peek(nox_cv, *nox_in_TP(N=300))
+    # peek2d(nox_cv, *nox_in_TP(N=300))
     # do(nox_cv, *nox_in_TP(N=140), blitz=4.0)
     do(nox_cv, *nox_in_TP(), spec=[(2, 3, 4, 5), (0, 1, 4)])
 
@@ -778,7 +852,7 @@ def nox():
 
     def nox_h(T, rho):
         return PropsSI("H", "T", T, "D", rho, "N2O")
-    # peek(nox_h, *nox_in_Trho())
+    # peek2d(nox_h, *nox_in_Trho())
     # do(nox_h, *nox_in_Trho(), noabserr=True, blitz=1.5)
     do(nox_h, *nox_in_Trho(), noabserr=True, spec=[(1, 3), (0, 1, 2)])
 
@@ -793,83 +867,263 @@ def nox():
 
     def nox_u(T, rho):
         return PropsSI("U", "T", T, "D", rho, "N2O")
-    # peek(nox_u, *nox_in_Trho())
+    # peek2d(nox_u, *nox_in_Trho())
     # do(nox_u, *nox_in_Trho(), noabserr=True, blitz=1.5)
     do(nox_u, *nox_in_Trho(), noabserr=True, spec=[(1, 2, 3), (0, 1, 2)])
 
     def nox_Z(T, rho):
         return PropsSI("Z", "T", T, "D", rho, "N2O")
-    # peek(nox_Z, *nox_in_Trho())
+    # peek2d(nox_Z, *nox_in_Trho())
     # do(nox_Z, *nox_in_Trho())
     do(nox_Z, *nox_in_Trho(), spec=[(0, 2, 4, 5), (0,)])
 
 
 
+
+
+
+class CEA_Result:
+    """
+    Example .inp nasacea input.
+    problem rocket equilibrium
+        p(bar) = 30.00000
+        o/f = 6.00000
+        sup = 4.00000
+    react
+        fuel=PARAFFIN wt=100.00000  t,k=298.15000 C 32 H 66 h,kc/mol=-224.20000
+        ox=N2O wt=100.00000  t,k=298.15000 N 2 O 1 h,kc/mol=15.50000
+    output trans
+        plot p t isp ivac m mw cp gam o/f cf rho son mach phi h cond pran ae pip
+    end
+    """
+
+    # All CEA_Wrap rocket result properties (note some units are changed by us to be base si):
+    NAMES = [
+        # "prod_c", # Chamber products (not saved)
+        # "prod_t", # Throat products (not saved)
+        # "prod_e", # Exit products (not saved)
+        "p", # Pressure, Pa
+        "t_p", # Throat pressure
+        "c_p", # Chamber pressure
+        "t", # Temperature, Kelvin
+        "t_t", # Throat temperature
+        "c_t", # Chamber temperature
+        "h", # Enthalpy, J/kg
+        "t_h", # Throat enthalpy
+        "c_h", # Chamber enthalpy
+        "rho", # Density, kg/m^3
+        "t_rho", # Throat density
+        "c_rho", # Chamber density
+        "son", # Sonic velocity, m/s
+        "t_son", # Throat sonic velocity
+        "c_son", # Chamber sonic velocity
+        "visc", # Burned gas viscosity, Pa*s
+        "t_visc", # Throat viscosity
+        "c_visc", # Chamber viscosity
+        "cond", # Burned gas thermal conductivity, W/(m*K)
+        "t_cond", # Throat thermal conductivity
+        "c_cond", # Chamber thermal conductivity
+        "pran", # Burned gas Prandtl number
+        "t_pran", # Throat Prandtl number
+        "c_pran", # Chamber Prandtl number
+        "mw", # Molecular weight of all products, kg/mol
+        "t_mw", # Throat molecular weight
+        "c_mw", # Chamber molecular weight
+        "cp", # Constant-pressure specific heat capacity, J/(kg*K)
+        "t_cp", # Throat cp
+        "c_cp", # Chamber cp
+        "gammas", # isentropic exponent (name from nasacea paper p1)
+                  # isentropic ratio of specific heats (name from cea_wrap)
+        "t_gammas", # Throat gammas
+        "c_gammas", # Chamber gammas
+        "gamma", # Real ratio of specific heats
+        "t_gamma", # Throat gamma
+        "c_gamma", # Chamber gamma
+        "isp", # Ideal ISP (ambient pressure = exit pressure), s
+        "t_isp", # Throat ISP
+        "ivac", # Vacuum ISP, s
+        "t_ivac", # Throat vacuum ISP
+        "cf", # Ideally expanded thrust coefficient
+        "t_cf", # Throat CF
+        "dLV_dLP_t", # (dLV/dLP)t
+        "t_dLV_dLP_t", # Throat dLV/dLP
+        "c_dLV_dLP_t", # Chamber dLV/dLP
+        "dLV_dLT_p", # (dLV/dLT)p
+        "t_dLV_dLT_p", # Throat dLV/dLT
+        "c_dLV_dLT_p", # Chamber dLV/dLT
+        "cstar", # Characteristic velocity in chamber, m/s
+        "mach", # Mach number at exhaust
+    ]
+    def __init__(self, data):
+        self.data = data
+    @classmethod
+    def from_cea(cls, cea):
+        data = np.empty(len(cls.NAMES), dtype=np.float32)
+        for name, i in cls.MAPPING.items():
+            # fix some stupid non-si values.
+            data[i] = getattr(cea, name)
+            if name in {"p", "t_p", "c_p"}:
+                data[i] *= 1e5 # bar -> Pa
+            elif name in {"h", "t_h", "c_h"}:
+                data[i] *= 1e3 # kJ/kg -> J/kg
+            elif name in {"mw", "t_mw", "c_mw"}:
+                data[i] *= 1e-3 # kg/kmol -> kg/mol
+            elif name in {"cp", "t_cp", "c_cp"}:
+                data[i] *= 1e3 # kJ/(kg*K) -> J/(kg*K)
+        return cls(data)
+    def __getattr__(self, name):
+        if name not in type(self).NAMES:
+            return super().__getattribute__(name)
+        return self.data[type(self).MAPPING[name]]
+CEA_Result.MAPPING = {n: i for i, n in enumerate(CEA_Result.NAMES)}
+CEA_Result.NAMES = set(CEA_Result.NAMES)
+
+
+
+
+class CEA:
+    CACHE_PATH = os.path.join(os.path.dirname(__file__), "approximator_cea_cache.npz")
+    LOCK_PATH = os.path.join(os.path.dirname(__file__), "approximator_cea_cache.lock")
+
+    def __init__(self):
+        # Compositions and enthalpy of formation of paraffin and N2O from Hybrid
+        # Rocket Propulsion Handbook, Karp & Jens.
+        fuel_comp = CEA_Wrap.ChemicalRepresentation(
+                " C 32 H 66", # need leading space to fix CEA_Wrap bug lmao.
+                hf=-224.2, hf_unit="kc")
+        fuel = CEA_Wrap.Fuel("PARAFFIN", temp=298.15, chemical_representation=fuel_comp)
+        ox_comp = CEA_Wrap.ChemicalRepresentation(" N 2 O 1",
+                hf=15.5, hf_unit="kc")
+        ox = CEA_Wrap.Oxidizer("N2O", temp=298.15, chemical_representation=ox_comp)
+        # Dummy initial params.
+        self.problem = CEA_Wrap.RocketProblem(pressure=20, pressure_units="bar",
+                materials=[fuel, ox], o_f=6, ae_at=8,
+            )
+        self.cache = {}
+
+    def keyof(self, P, ofr, eps):
+        P = round(float(P), 4)
+        ofr = round(float(ofr), 3)
+        eps = round(float(eps), 3)
+        return P, ofr, eps
+
+    def __call__(self, P, ofr, eps): # expects P in MPa
+        key = self.keyof(P, ofr, eps)
+        if key not in self.cache:
+            P, ofr, eps = key
+            self.problem.set_pressure(P * 10) # mpa -> bar
+            self.problem.set_o_f(ofr)
+            self.problem.set_ae_at(eps)
+            cea = self.problem.run()
+            self.cache[key] = CEA_Result.from_cea(cea)
+        return self.cache[key]
+
+    def __getitem__(self, name):
+        def f(P, ofr, eps):
+            return getattr(self(P, ofr, eps), name)
+        f.__name__ = f"cea.{name}"
+        return np.vectorize(f)
+
+    def load(self, lock=True):
+        filelock = FileLock(self.LOCK_PATH) if lock else contextlib.nullcontext()
+        with filelock:
+            if os.path.exists(self.CACHE_PATH):
+                data = np.load(self.CACHE_PATH)
+                keys = data["keys"]
+                values = data["values"]
+                cache = {self.keyof(*k): CEA_Result(v) for k, v in zip(keys, values)}
+                self.cache = cache | self.cache
+    def save(self):
+        with FileLock(self.LOCK_PATH):
+            print("saving cea cache...")
+            self.load(lock=False)
+            keys = np.array(list(self.cache.keys()), dtype=np.float32)
+            values = np.array(list(x.data for x in self.cache.values()), dtype=np.float32)
+            np.savez(self.CACHE_PATH, keys=keys, values=values, allow_pickle=False)
+            print("saved cea cache.")
+            print()
+
+    def __enter__(self):
+        self.load()
+    def __exit__(self, etype, evalue, etb):
+        self.save()
+        return False
+
+    # chamber pressure always lower than tank, but just use same bounds. also just assume no
+    # comb at pressure below 90kPa.
+    P_low = 0.09
+    P_high = 7.2
+    def in_P(self, N=120, conc=None, strength=0.0):
+        return concspace(self.P_low, conc, self.P_high, strength=strength, N=N)
+    # ox-fuel ratio reasonably below 13, and below 0.5 can safely assume no comb.
+    ofr_low = 0.5
+    ofr_high = 13.0
+    def in_ofr(self, N=120, conc=None, strength=0.0):
+        return concspace(self.ofr_low, conc, self.ofr_high, strength=strength, N=N)
+    # nozzle exit area/throat area reasonably low for us since we have low altitude and low chamber pressure.
+    eps_low = 1.2
+    eps_high = 12.0
+    def in_eps(self, N=120, conc=None, strength=0.0):
+        return concspace(self.eps_low, conc, self.eps_high, strength=strength, N=N)
+
+    def in_Peps(self, N=70, Pconc=None, Pstrength=0.0, epsconc=None, epsstrength=0.0):
+        X = self.in_P(N, Pconc, Pstrength)
+        Y = self.in_eps(N, epsconc, epsstrength)
+        return np.meshgrid(X, Y)
+    def in_Pofr(self, N=70, Pconc=None, Pstrength=0.0, ofrconc=None, ofrstrength=0.0):
+        X = self.in_P(N, Pconc, Pstrength)
+        Y = self.in_ofr(N, ofrconc, ofrstrength)
+        return np.meshgrid(X, Y)
+    def in_ofreps(self, N=70, ofrconc=None, ofrstrength=0.0, epsconc=None, epsstrength=0.0):
+        X = self.in_ofr(N, ofrconc, ofrstrength)
+        Y = self.in_eps(N, epsconc, epsstrength)
+        return np.meshgrid(X, Y)
+
+    def in_Pofreps(self, N=30):
+        return np.meshgrid(self.in_P(N), self.in_ofr(N), self.in_eps(N))
+
+CEA = CEA()
+
+
+
+
 def cea():
-    from . import optimiser
-    fuel = optimiser.PARAFFIN
-    ox = optimiser.NOX
-    cea = optimiser.CEA_Obj(propName="", oxName=ox.name, fuelName=fuel.name,
-                  isp_units="sec",
-                  cstar_units="m/s",
-                  pressure_units="Pa",
-                  temperature_units="K",
-                  sonic_velocity_units="m/s",
-                  enthalpy_units="J/kg",
-                  density_units="kg/m^3",
-                  specific_heat_units="J/kg-K")
 
-    # NOTE: same pressure calcs done in MPa, and ofr must be >0.5 (for anything lower,
-    #       assume no combustion occurs)
-
-    def cea_in_P(conc=None, strength=0.0, N=120):
-        # chamber pressure always lower than tank, just use same bounds.
-        return concspace(0.09, conc, 7.2, strength=strength, N=N)
-    def cea_in_ofr(conc=None, strength=0.0, N=120):
-        # ox-fuel ratio reasonably below 13.
-        return concspace(0.5, conc, 13, strength=strength, N=N)
-    def cea_in_Pofr(Pconc=None, Pstrength=0.0, ofrconc=None, ofrstrength=0.0, N=40):
-        X = cea_in_P(Pconc, Pstrength, N=N)
-        Y = cea_in_ofr(ofrconc, ofrstrength, N=N)
+    # cc temperature is independant of epsilon. Also its a huge pain to approx,
+    # so we split into a high-ofr approx and a low-ofr approx which combine to
+    # cover the whole input space. This should have negligible performance
+    # impacts because the motor generally stays in high ofr at the beginning then
+    # is in low ofr for the rest (so very predictable branch).
+    def cea_T_cc_in_high(N=70):
+        X = CEA.in_P(N=N)
+        Y = concspace(4, 4, CEA.ofr_high, strength=1.0, N=N)
         return np.meshgrid(X, Y)
-
-
-    # Tcomb is a huge pain to approx, so we split into a high-ofr approx and
-    # a low-ofr approx which combine to cover the whole input space. This
-    # should have negligible performance impacts because the motor generally
-    # stays in high ofr at the beginning then is in low ofr for the rest (so
-    # very predictable branch).
-    def cea_Tcomb_in_high(N=70):
-        X = cea_in_P(conc=None, strength=0.0, N=N)
-        Y = concspace(4, 4, 13, strength=1.0, N=N)
+    def cea_T_cc_in_low(N=70):
+        X = CEA.in_P(N=N, conc=0.1, strength=1.0)
+        Y = concspace(CEA.ofr_low, CEA.ofr_low, 4, strength=1.0, N=N)
         return np.meshgrid(X, Y)
-    def cea_Tcomb_in_low(N=70):
-        X = cea_in_P(conc=0.1, strength=1.0, N=N)
-        Y = concspace(0.5, 0.5, 4, strength=1.0, N=N)
+    def cea_T_cc_high(P, ofr):
+        return CEA["c_t"](P, ofr, 2)
+    def cea_T_cc_low(P, ofr): # just get a different __name__
+        return CEA["c_t"](P, ofr, 2)
+    # peek2d(cea_T_cc_high, *CEA.in_Pofr())
+
+    # do(cea_T_cc_high, *cea_T_cc_in_high(), blitz=4.0, starting_cost=27)
+    do(cea_T_cc_high, *cea_T_cc_in_high(), spec=[(0, 1, 2, 4, 5), (1, 4, 5, 7, 8)])
+
+    # do(cea_T_cc_low, *cea_T_cc_in_low(), blitz=4.0, starting_cost=27)
+    do(cea_T_cc_low, *cea_T_cc_in_low(), spec=[(0, 1, 2), (0, 1, 2, 4)])
+
+
+    # cc cp is also indep of eps. Also after having a peek at cp, id say "looks fucking grim mate".
+    # lets split over ofr again. HOLY its a doozy. split low again into left and right.
+    def cea_cp_cc_in_high(N=50):
+        X = CEA.in_P(N=N)
+        Y = concspace(4, 4, CEA.ofr_high, strength=2.0, N=N)
         return np.meshgrid(X, Y)
-    cea_get_Tcomb = np.vectorize(cea.get_Tcomb)
-    def cea_Tcomb_high(P, ofr):
-        return cea_get_Tcomb(P * 1e6, ofr)
-    def cea_Tcomb_low(P, ofr): # just get a different __name__
-        return cea_get_Tcomb(P * 1e6, ofr)
-    # peek(cea_Tcomb_high, *np.meshgrid(cea_in_P(), cea_in_ofr()))
-
-    # do(cea_Tcomb_high, *cea_Tcomb_in_high(), blitz=4.0, starting_cost=27)
-    do(cea_Tcomb_high, *cea_Tcomb_in_high(), spec=[(0, 1, 2, 4, 5), (1, 4, 5, 7, 8)])
-
-    # do(cea_Tcomb_low, *cea_Tcomb_in_low(), blitz=4.0, starting_cost=27)
-    do(cea_Tcomb_low, *cea_Tcomb_in_low(), spec=[(0, 1, 2), (0, 1, 2, 4)])
-
-
-    # after having a peek at cp, id say "looks fucking grim mate". lets split
-    # over ofr again. HOLY its a doozy. split low again into left and right.
-    def cea_Cp_in_high(N=50):
-        X = cea_in_P(conc=None, strength=0.0, N=N)
-        Y = concspace(4, 4, 13, strength=2.0, N=N)
-        return np.meshgrid(X, Y)
-    def cea_Cp_in_low_left(N=40):
-        X = concspace(0.08, 1, 1, strength=2.0, N=N)
-        Y = concspace(0.5, 4, 4, strength=2.0, N=N)
+    def cea_cp_cc_in_low_left(N=40):
+        X = concspace(CEA.P_low, 1, 1, strength=2.0, N=N)
+        Y = concspace(CEA.ofr_low, 4, 4, strength=2.0, N=N)
         X, Y = np.meshgrid(X, Y)
         def mask(X, Y, training=False):
             return np.ones(X.shape, dtype=bool)
@@ -877,114 +1131,356 @@ def cea():
                 return np.ones(X.shape, dtype=bool)
             return (X > 0.15)
         return X, Y, mask
-    def cea_Cp_in_low_right(N=40):
-        X = concspace(1, 7, 7, strength=1.0, N=N)
-        Y = concspace(0.5, 4, 4, strength=2.0, N=N)
+    def cea_cp_cc_in_low_right(N=40):
+        X = concspace(1, CEA.P_high, CEA.P_high, strength=1.0, N=N)
+        Y = concspace(CEA.ofr_low, 4, 4, strength=2.0, N=N)
         X, Y = np.meshgrid(X, Y)
         def mask(X, Y, training=False):
             return np.ones(X.shape, dtype=bool)
         return X, Y, mask
-    # "should be independant of eps"
-    cea_get_Cp = np.vectorize(lambda a, b: cea.get_Chamber_Cp(a, b, 20))
-    def cea_Cp_high(P, ofr):
-        return cea_get_Cp(P * 1e6, ofr)
-    def cea_Cp_low_left(P, ofr):
-        return cea_get_Cp(P * 1e6, ofr)
-    def cea_Cp_low_right(P, ofr):
-        return cea_get_Cp(P * 1e6, ofr)
-    # peek(cea_Cp_high, *np.meshgrid(cea_in_P(), cea_in_ofr()))
+    def cea_cp_cc_high(P, ofr):
+        return CEA["c_cp"](P, ofr, 2)
+    def cea_cp_cc_low_left(P, ofr):
+        return CEA["c_cp"](P, ofr, 2)
+    def cea_cp_cc_low_right(P, ofr):
+        return CEA["c_cp"](P, ofr, 2)
+    # peek2d(cea_cp_cc_high, *CEA.in_Pofr())
 
-    # do(cea_Cp_high, *cea_Cp_in_high(), blitz=4.0, starting_cost=30)
-    do(cea_Cp_high, *cea_Cp_in_high(N=100), spec=[(1, 4, 6, 7, 8, 9), (0, 1, 2, 4, 8, 9)])
+    # do(cea_cp_cc_high, *cea_cp_cc_in_high(), blitz=4.0, starting_cost=30)
+    do(cea_cp_cc_high, *cea_cp_cc_in_high(N=70), spec=[(1, 4, 6, 7, 8, 9), (0, 1, 2, 4, 8, 9)])
 
-    # do(cea_Cp_low_left, *cea_Cp_in_low_left(), blitz=4.0, starting_cost=26)
-    do(cea_Cp_low_left, *cea_Cp_in_low_left(N=100), spec=[(0, 1, 2, 3, 4, 5), (0, 1, 2, 4, 5, 7, 8, 9)])
+    # do(cea_cp_cc_low_left, *cea_cp_cc_in_low_left(), blitz=4.0, starting_cost=26)
+    do(cea_cp_cc_low_left, *cea_cp_cc_in_low_left(N=70), spec=[(0, 1, 2, 3, 4, 5), (0, 1, 2, 4, 5, 7, 8, 9)])
 
-    # do(cea_Cp_low_right, *cea_Cp_in_low_right(), blitz=3.0, starting_cost=24)
-    do(cea_Cp_low_right, *cea_Cp_in_low_right(N=100), spec=[(0, 1, 2, 5), (0, 1, 2, 4, 5, 8)])
-
-    def cea_Cp_combined(P, ofr):
-        if ofr >= 4:
-            x1 = P
-            y1 = ofr
-            x1y1 = P*ofr
-            x3 = P*P*P
-            x2y1 = x1y1 * P
-            x1y2 =x1y1 * ofr
-            y3 = ofr*ofr*ofr
-            p1 = 3802.3766890029965
-            p4 = 959.1089167566258
-            p6 = 0.9740826587244922
-            p7 = 3.5480311720693734
-            p8 = 75.4934686487755
-            q0 = 0.06375088655715791
-            q1 = 2.0937979929620574
-            q2 = 0.012683649993537984
-            q4 = 0.5040092283785854
-            q8 = 0.03403190253379037
-            q9 = 0.00023048707705274537
-            P = p1*x1 - p4*x1y1 + p6*x3 - p7*x2y1 + p8*x1y2 + y3
-            Q = q0 + q1*x1 - q2*y1 - q4*x1y1 + q8*x1y2 + q9*y3
-            return P / Q
-        if P >= 1:
-            x1 = P
-            y1 = ofr
-            x1y1 = P*ofr
-            y2 = ofr*ofr
-            x1y2 = x1y1*ofr
-            p0 = 4.138832624431316
-            p1 = 0.29817405524316326
-            p2 = 3.2575841375358316
-            q0 = 0.0005884213088340639
-            q1 = 7.309846342943449e-05
-            q2 = 0.0007528849169182324
-            q4 = 4.3580339523010414e-05
-            q5 = 0.0003868623137207404
-            q8 = 1.9187426863527176e-05
-            P = p0 + p1*x1 - p2*y1 + y2
-            Q = q0 + q1*x1 - q2*y1 - q4*x1y1 + q5*y2 + q8*x1y2
-            return P / Q
-        x1 = P
-        y1 = ofr
-        x2 = P*P
-        x1y1 = P*ofr
-        y2 = ofr*ofr
-        x2y1 = x1y1 * P
-        x1y2 = x1y1 * ofr
-        y3 = ofr*ofr*ofr
-        p0 = 3.0551837534331043
-        p1 = 1.1168085957129472
-        p2 = 3.057032048465364
-        p3 = 0.08801722733929103
-        p4 = 0.2480662508580779
-        q0 = 0.00035410768902353467
-        q1 = 0.00019003775520538854
-        q2 = 0.0004712179241529132
-        q4 = 0.00012521491909272612
-        q5 = 0.00021512281760482563
-        q7 = 4.846442773758666e-07
-        q8 = 3.615723753207365e-05
-        q9 = 2.406864519884499e-05
-        P = p0 + p1*x1 - p2*y1 - p3*x2 - p4*x1y1 + y2
-        Q = q0 + q1*x1 - q2*y1 - q4*x1y1 + q5*y2 + q7*x2y1 + q8*x1y2 + q9*y3
-        return P / Q
-    # compare(*np.meshgrid(cea_in_P(N=100), cea_in_ofr(N=100)), cea_Cp, np.vectorize(cea_Cp_combined))
+    # do(cea_cp_cc_low_right, *cea_cp_cc_in_low_right(), blitz=3.0, starting_cost=24)
+    do(cea_cp_cc_low_right, *cea_cp_cc_in_low_right(N=70), spec=[(0, 1, 2, 5), (0, 1, 2, 4, 5, 8)])
 
 
-    # should also be indep of eps? (also stupid non si return value)
-    cea_get_Mw = np.vectorize(lambda a, b: 1e-3 * cea.get_Chamber_MolWt_gamma(a, b, 20)[0])
+    # cc Mw indep of eps.
     def cea_Mw(P, ofr):
-        return cea_get_Mw(P * 1e6, ofr)
-    # peek(cea_Mw, *cea_in_Pofr())
-    # do(cea_Mw, *cea_in_Pofr(N=40), blitz=1.0)
-    do(cea_Mw, *cea_in_Pofr(N=100), spec=[(0, 1, 3, 4, 5), (1, 2, 3, 5)])
+        return CEA["c_mw"](P, ofr, 2)
+    # peek(cea_Mw, *CEA.in_Pofr())
+    # do(cea_Mw, *CEA.in_Pofr(N=40), blitz=1.0)
+    do(cea_Mw, *CEA.in_Pofr(N=70), spec=[(0, 1, 3, 4, 5), (1, 2, 3, 5)])
+
+
+
+
+
+    def map_Peps(f, ofr=6, vectorise=None):
+        vf = lambda P, eps: f(P, ofr, eps)
+        if vectorise is True or vectorise is None and isinstance(f, np.vectorize):
+            vf = np.vectorize(vf)
+        vf.__name__ = f.__name__ + f"  | x=P, y=eps, ofr={ofr}"
+        return vf
+    def map_Pofr(f, eps=3, vectorise=None):
+        vf = lambda P, ofr: f(P, ofr, eps)
+        if vectorise is True or vectorise is None and isinstance(f, np.vectorize):
+            vf = np.vectorize(vf)
+        vf.__name__ = f.__name__ + f"  | x=P, y=ofr, eps={eps}"
+        return vf
+    def map_ofreps(f, P=2, vectorise=None):
+        vf = lambda ofr, eps: f(P, ofr, eps)
+        if vectorise is True or vectorise is None and isinstance(f, np.vectorize):
+            vf = np.vectorize(vf)
+        vf.__name__ = f.__name__ + f"  | x=ofr, y=eps, P={P}"
+        return vf
+
+
+
+    # "random" values for testing.
+    mdot = 0.4
+    A_throat = 0.025**2 * np.pi / 4
+    P_a = 1e5
+    # P_a = 0.0
+    g0 = 9.80665
+
+    def thurst_ideal(P, ofr, eps):
+        cea = CEA(P, ofr, eps)
+        return mdot * cea.cstar * cea.cf
+    def thurst_no_vel_change(P, ofr, eps):
+        cea = CEA(P, ofr, eps)
+        Ve = cea.isp * g0
+        # Also works:
+        # Ve = cea.mach * cea.son
+        # Ve = np.sqrt(2 * (cea.c_h - cea.h))
+        return mdot * Ve + (cea.p - P_a) * A_throat*eps
+    def thurst_isp_vaccuum(P, ofr, eps):
+        cea = CEA(P, ofr, eps)
+        Ve_vac = cea.ivac * g0
+        return mdot * Ve_vac - P_a * A_throat*eps
+    def thurst_rocketcea_formula(P, ofr, eps):
+        cea = CEA(P, ofr, eps)
+        cf = cea.isp * g0 / cea.cstar - eps * P_a / (P*1e6)
+        return mdot * cea.cstar * cf
+
+
+    if 0:
+        for name, func in locals().items():
+            if not name.startswith("thurst"):
+                continue
+            peek3d(
+                [map_Peps(func), *CEA.in_Peps()],
+                [map_Pofr(func), *CEA.in_Pofr()],
+                [map_ofreps(func), *CEA.in_ofreps()],
+            )
+        return
+
+
+    if 1:
+        class Bias:
+            # Biases a linearly-spaced interval to be not that, so that a transformation can
+            # be applied to inputs of a lut but the lut lookup itself can still be using a
+            # regularly spaced rectangular grid for fast lookup (allowing the fit of the lut
+            # to be better on average, since data may change more densely in certain regions).
+            # https://www.desmos.com/calculator/okiztovx6y
+            @classmethod
+            def P_from(cls, i):
+                A = CEA.P_low
+                B = CEA.P_high
+                a0 = -1.4
+                a1 = 0.5 * (A + B - np.sqrt((A + B)**2 - 4*(A*B + B*a0 - 4*a0)))
+                a2 = a0 / (a1 - A)
+                return a0 / (i - a2) + a1
+                return i
+            @classmethod
+            def P_to(cls, P):
+                A = CEA.P_low
+                B = CEA.P_high
+                a0 = -1.4
+                a1 = 0.5 * (A + B - np.sqrt((A + B)**2 - 4*(A*B + B*a0 - 4*a0)))
+                a2 = a0 / (a1 - A)
+                return a0 / (P - a1) + a2
+                return P
+            @classmethod
+            def ofr_from(cls, j):
+                return j
+                A = CEA.ofr_low
+                B = CEA.ofr_high
+                a0 = -15.0
+                a1 = 0.5 * (A + B - np.sqrt((A + B)**2 - 4*(A*B + B*a0 - 4*a0)))
+                a2 = a0 / (a1 - A)
+                return a0 / (j - a2) + a1
+            @classmethod
+            def ofr_to(cls, ofr):
+                return ofr
+                A = CEA.ofr_low
+                B = CEA.ofr_high
+                a0 = -15.0
+                a1 = 0.5 * (A + B - np.sqrt((A + B)**2 - 4*(A*B + B*a0 - 4*a0)))
+                a2 = a0 / (a1 - A)
+                return a0 / (ofr - a1) + a2
+            @classmethod
+            def eps_from(cls, k):
+                A = CEA.eps_low
+                B = CEA.eps_high
+                a0 = -3.3
+                a1 = 0.5 * (A + B - np.sqrt((A + B)**2 - 4*(A*B + B*a0 - 4*a0)))
+                a2 = a0 / (a1 - A)
+                return a0 / (k - a2) + a1
+                return k
+            @classmethod
+            def eps_to(cls, eps):
+                A = CEA.eps_low
+                B = CEA.eps_high
+                a0 = -3.3
+                a1 = 0.5 * (A + B - np.sqrt((A + B)**2 - 4*(A*B + B*a0 - 4*a0)))
+                a2 = a0 / (a1 - A)
+                return a0 / (eps - a1) + a2
+                return eps
+
+            @classmethod
+            def in_P(cls, N=120):
+                return cls.P_to(CEA.in_P(N=N))
+            @classmethod
+            def in_ofr(cls, N=120):
+                return cls.ofr_to(CEA.in_ofr(N=N))
+            @classmethod
+            def in_ofr(cls, N=120):
+                return cls.eps_to(CEA.in_eps(N=N))
+
+            @classmethod
+            def in_Peps(cls, N=70):
+                P, eps = CEA.in_Peps(N=N)
+                return cls.P_to(P), cls.eps_to(eps)
+            @classmethod
+            def in_Pofr(cls, N=70):
+                P, ofr = CEA.in_Pofr(N=N)
+                return cls.P_to(P), cls.ofr_to(ofr)
+            @classmethod
+            def in_ofreps(cls, N=70):
+                ofr, eps = CEA.in_ofreps(N=N)
+                return cls.ofr_to(ofr), cls.eps_to(eps)
+
+            @classmethod
+            def in_Pofreps(cls, N=30):
+                P, ofr, eps = CEA.in_Pofreps(N=N)
+                return cls.P_to(P), cls.ofr_to(ofr), cls.eps_to(eps)
+
+        lut = LUT(
+                (Bias.P_to(CEA.P_low), Bias.P_to(CEA.P_high), 2),
+                (Bias.ofr_to(CEA.ofr_low), Bias.ofr_to(CEA.ofr_high), 10),
+                (Bias.eps_to(CEA.eps_low), Bias.eps_to(CEA.eps_high), 2),
+            )
+        def unbiased_lut(P, ofr, eps):
+            i, j, k = Bias.P_to(P), Bias.ofr_to(ofr), Bias.eps_to(eps)
+            return lut(i, j, k)
+
+        def biased_ivac(i, j, k):
+            return CEA["ivac"](Bias.P_from(i), Bias.ofr_from(j), Bias.eps_from(k))
+        lut.match(biased_ivac)
+
+        def error(P, ofr, eps):
+            P = P.ravel()
+            ofr = ofr.ravel()
+            eps = eps.ravel()
+            approx = unbiased_lut(P, ofr, eps)
+            real = CEA["ivac"](P, ofr, eps)
+            return 100.0 * np.abs(approx / real - 1)
+        print("Ivac using LUT")
+        print(f"{np.prod(lut.N)} elements [{','.join(map(str, lut.N))}]")
+        print(f"{np.max(error(*CEA.in_Pofreps(N=50))):.3g} %error")
+
+        with np.printoptions(precision=np.finfo(float).precision, suppress=False):
+            if lut.N[0] == 3:
+                print("P (unbiased):")
+                print(Bias.P_from(lut.axes[0]))
+            elif lut.N[0] > 3:
+                print("P (biased):")
+                print(lut.axes[0])
+            if lut.N[1] == 3:
+                print("ofr (unbiased):")
+                print(Bias.ofr_from(lut.axes[1]))
+            elif lut.N[1] > 3:
+                print("ofr (biased):")
+                print(lut.axes[1])
+            if lut.N[2] == 3:
+                print("eps (unbiased):")
+                print(Bias.eps_from(lut.axes[2]))
+            elif lut.N[2] > 3:
+                print("eps (biased):")
+                print(lut.axes[2])
+            print("data:")
+            print(lut.data)
+            print()
+
+        if 0:
+            maxerr = 0.0
+            maxP = None
+            for P in CEA.in_P(N=50):
+                ofr, eps = CEA.in_ofreps(N=50)
+                err = np.max(error(P, ofr, eps))
+                if err > maxerr:
+                    maxerr = err
+                    maxP = P
+            maxerr = 0.0
+            maxofr = None
+            for ofr in CEA.in_ofr(N=50):
+                P, eps = CEA.in_Peps(N=50)
+                err = np.max(error(P, ofr, eps))
+                if err > maxerr:
+                    maxerr = err
+                    maxofr = ofr
+            maxerr = 0.0
+            maxeps = None
+            for eps in CEA.in_eps(N=50):
+                P, ofr = CEA.in_Pofr(N=50)
+                err = np.max(error(P, ofr, eps))
+                if err > maxerr:
+                    maxerr = err
+                    maxeps = eps
+            def error_Pofr(P, ofr, eps=maxeps):
+                return error(P, ofr, eps)
+            def error_Peps(P, eps, ofr=maxofr):
+                return error(P, ofr, eps)
+            def error_ofreps(ofr, eps, P=maxP):
+                return error(P, ofr, eps)
+            peek3d(
+                [map_Pofr(CEA["ivac"], eps=maxeps), *CEA.in_Pofr(N=50)],
+                [map_Pofr(unbiased_lut, eps=maxeps, vectorise=False), *CEA.in_Pofr(N=50)],
+                [error_Pofr, *CEA.in_Pofr(N=50)],
+            )
+            peek3d(
+                [map_Peps(CEA["ivac"], ofr=maxofr), *CEA.in_Peps(N=50)],
+                [map_Peps(unbiased_lut, ofr=maxofr, vectorise=False), *CEA.in_Peps(N=50)],
+                [error_Peps, *CEA.in_Peps(N=50)],
+            )
+            peek3d(
+                [map_ofreps(CEA["ivac"], P=maxP), *CEA.in_ofreps(N=50)],
+                [map_ofreps(unbiased_lut, P=maxP, vectorise=False), *CEA.in_ofreps(N=50)],
+                [error_ofreps, *CEA.in_ofreps(N=50)],
+            )
+
+
+            for ofr in CEA.in_ofr(N=50):
+                if ofr < 2.0 or ofr > 9.5:
+                    continue
+                P, eps = CEA.in_Peps(N=50)
+                peek3d(
+                    [map_Peps(CEA["ivac"], ofr=ofr), *CEA.in_Peps(N=50)],
+                    [map_Peps(unbiased_lut, ofr=ofr, vectorise=False), *CEA.in_Peps(N=50)],
+                    [lambda P, eps: error_Peps(P, eps, ofr), *CEA.in_Peps(N=50)],
+                )
+
+
+def atmos():
+    def atmos_get_Pa(altitude):
+        g0 = 9.80665  # m/s2
+        R = 8.3144598 # J/mol/K
+        M = 0.0289644 # kg/mol
+
+        # Define layers: base altitude (m), base temp (K), base pressure (Pa), lapse rate (K/m)
+        layers = [
+            (0,       288.15, 101325.0,    -0.0065),   # Troposphere
+            (11000,   216.65, 22632.1,      0.0),      # Tropopause
+            (20000,   216.65, 5474.89,      0.001),    # Lower Stratosphere
+            (32000,   228.65, 868.02,       0.0028),
+            (47000,   270.65, 110.91,       0.0),
+            (51000,   270.65, 66.94,       -0.0028),
+            (71000,   214.65, 3.96,        -0.002),    # Mesosphere
+            (84852,   186.87, 0.3734,       0.0)       # Upper Mesosphere
+        ]
+
+        for i in range(len(layers) - 1):
+            h_base, T_base, P_base, L = layers[i]
+            h_next = layers[i + 1][0]
+            if altitude < h_next:
+                h = altitude
+                break
+        else:
+            # If above last defined layer, extrapolate with last known values
+            h_base, T_base, P_base, L = layers[-1]
+            h = altitude
+
+        if L == 0:
+            # Isothermal layer
+            pressure = P_base * math.exp(-g0 * M * (h - h_base) / (R * T_base))
+        else:
+            # Gradient layer
+            T = T_base + L * (h - h_base)
+            pressure = P_base * (T / T_base) ** (-g0 * M / (R * L))
+
+        return pressure
+
+    altitude_off = 10_000
+    altitude = concspace(altitude_off, altitude_off, altitude_off + 30_000, N=100, strength=5.0)
+    def atmos_Pa(x):
+        return np.vectorize(atmos_get_Pa)(x - altitude_off)
+    # peek1d(Pa, altitude)
+    # do(atmos_Pa, altitude)
+    do(atmos_Pa, altitude, spec=[(0, 1, 2), (0, 1, 2)])
 
 
 
 def main():
 
     nox()
-    cea()
+
+    with CEA:
+        cea()
+
+    atmos()
+
     plt.show()
 
     """
@@ -1258,47 +1754,47 @@ nox_Z -> (4.1802e+05 - 4210 y + 9.9798 xy + y^2) / (4.196e+05)
     f64 c5 = +2.383200854104837e-06;
     return c0 + c2*y1 + c4*x1y1 + c5*y2;
 
-cea_Tcomb_high: {'spec': [(0, 1, 2, 4, 5), (1, 4, 5, 7, 8)]}
-(0, 1, 2, 4, 5) / (1, 4, 5, 7, 8) ..................... 2.699%
-cea_Tcomb_high -> (-14.287 - 32.406 x + 3.4742 y + 18.31 xy + y^2) / (0.0083002 x + 0.0013854 xy + 0.00041962 y^2 - 4.2153e-06 x^2 y + 0.00023245 xy^2)
+cea_T_cc_high: {'spec': [(0, 1, 2, 4, 5), (1, 4, 5, 7, 8)]}
+(0, 1, 2, 4, 5) / (1, 4, 5, 7, 8) ..................... 2.698%
+cea_T_cc_high -> (-14.288 - 32.429 x + 3.4748 y + 18.316 xy + y^2) / (0.0082956 x + 0.0013866 xy + 0.00041964 y^2 - 4.2175e-06 x^2 y + 0.00023248 xy^2)
     f64 x1 = ;
     f64 y1 = ;
     f64 x1y1 = ;
     f64 y2 = ;
     f64 x2y1 = ;
     f64 x1y2 = ;
-    f64 n0 = -14.286699845712628;
-    f64 n1 = -32.4062851919402;
-    f64 n2 = +3.4742076078850297;
-    f64 n4 = +18.309776531751787;
-    f64 d1 = +0.008300237024458222;
-    f64 d4 = +0.001385352578317833;
-    f64 d5 = +0.00041962485459847375;
-    f64 d7 = -4.215277067475584e-06;
-    f64 d8 = +0.00023245123290958759;
+    f64 n0 = -14.288432205175953;
+    f64 n1 = -32.42867599262846;
+    f64 n2 = +3.474751778815847;
+    f64 n4 = +18.31561738023227;
+    f64 d1 = +0.008295564068249973;
+    f64 d4 = +0.0013866109147024212;
+    f64 d5 = +0.0004196407872643308;
+    f64 d7 = -4.217470292937784e-06;
+    f64 d8 = +0.00023248363130312795;
     f64 Num = n0 + n1*x1 + n2*y1 + n4*x1y1 + y2;
     f64 Den = d1*x1 + d4*x1y1 + d5*y2 + d7*x2y1 + d8*x1y2;
     return Num / Den;
 
-cea_Tcomb_low: {'spec': [(0, 1, 2), (0, 1, 2, 4)]}
-(0, 1, 2) / (0, 1, 2, 4) .............................. 3.831%
-cea_Tcomb_low -> (4.6259 + 4.241 x + y) / (0.0062646 + 0.0038335 x - 0.00065063 y - 0.00050479 xy)
+cea_T_cc_low: {'spec': [(0, 1, 2), (0, 1, 2, 4)]}
+(0, 1, 2) / (0, 1, 2, 4) .............................. 3.829%
+cea_T_cc_low -> (4.6262 + 4.2415 x + y) / (0.0062651 + 0.003834 x - 0.00065075 y - 0.00050486 xy)
     f64 x1 = ;
     f64 y1 = ;
     f64 x1y1 = ;
-    f64 n0 = +4.625880807530353;
-    f64 n1 = +4.240967496861169;
-    f64 d0 = +0.0062645868710667785;
-    f64 d1 = +0.003833484131106042;
-    f64 d2 = -0.0006506284584737187;
-    f64 d4 = -0.0005047873316636391;
+    f64 n0 = +4.626249969485239;
+    f64 n1 = +4.2414906007771505;
+    f64 d0 = +0.006265099088905423;
+    f64 d1 = +0.0038339663921447076;
+    f64 d2 = -0.0006507452327885072;
+    f64 d4 = -0.0005048607265830429;
     f64 Num = n0 + n1*x1 + y1;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1;
     return Num / Den;
 
-cea_Cp_high: {'spec': [(1, 4, 6, 7, 8, 9), (0, 1, 2, 4, 8, 9)]}
-(1, 4, 6, 7, 8, 9) / (0, 1, 2, 4, 8, 9) ............... 5.2%
-cea_Cp_high -> (3582.9 x - 907.66 xy + 0.86387 x^3 - 3.093 x^2 y + 70.736 xy^2 + y^3) / (0.061154 + 1.9517 x - 0.012086 y - 0.47145 xy + 0.031758 xy^2 + 0.00023038 y^3)
+cea_cp_cc_high: {'spec': [(1, 4, 6, 7, 8, 9), (0, 1, 2, 4, 8, 9)]}
+(1, 4, 6, 7, 8, 9) / (0, 1, 2, 4, 8, 9) ............... 4.683%
+cea_cp_cc_high -> (3697.2 x - 936.45 xy + 0.92708 x^3 - 3.2824 x^2 y + 73.081 xy^2 + y^3) / (0.061171 + 2.0171 x - 0.012091 y - 0.48726 xy + 0.032836 xy^2 + 0.00022932 y^3)
     f64 x1 = ;
     f64 y1 = ;
     f64 x1y1 = ;
@@ -1306,24 +1802,24 @@ cea_Cp_high -> (3582.9 x - 907.66 xy + 0.86387 x^3 - 3.093 x^2 y + 70.736 xy^2 +
     f64 x2y1 = ;
     f64 x1y2 = ;
     f64 y3 = ;
-    f64 n1 = +3582.944641587491;
-    f64 n4 = -907.659602547744;
-    f64 n6 = +0.8638673972095523;
-    f64 n7 = -3.09295057735193;
-    f64 n8 = +70.73570153378617;
-    f64 d0 = +0.06115388267778262;
-    f64 d1 = +1.9517349532470427;
-    f64 d2 = -0.012085905000346658;
-    f64 d4 = -0.47145131429742476;
-    f64 d8 = +0.03175824988676035;
-    f64 d9 = +0.0002303751013953221;
+    f64 n1 = +3697.2499992698126;
+    f64 n4 = -936.4542475610451;
+    f64 n6 = +0.9270759227273586;
+    f64 n7 = -3.2824223104827146;
+    f64 n8 = +73.08080264333545;
+    f64 d0 = +0.06117125463913653;
+    f64 d1 = +2.017096527865246;
+    f64 d2 = -0.012091433831058363;
+    f64 d4 = -0.4872595016883579;
+    f64 d8 = +0.03283582431629867;
+    f64 d9 = +0.00022931797763498784;
     f64 Num = n1*x1 + n4*x1y1 + n6*x3 + n7*x2y1 + n8*x1y2 + y3;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d8*x1y2 + d9*y3;
     return Num / Den;
 
-cea_Cp_low_left: {'spec': [(0, 1, 2, 3, 4, 5), (0, 1, 2, 4, 5, 7, 8, 9)]}
-(0, 1, 2, 3, 4, 5) / (0, 1, 2, 4, 5, 7, 8, 9) ......... 6.587%
-cea_Cp_low_left -> (2.8701 + 1.4321 x - 2.9517 y - 0.24204 x^2 - 0.35194 xy + y^2) / (0.00035573 + 0.00018934 x - 0.00050345 y - 7.7265e-05 xy + 0.00023584 y^2 - 2.1318e-05 x^2 y + 1.852e-05 xy^2 + 2.3367e-05 y^3)
+cea_cp_cc_low_left: {'spec': [(0, 1, 2, 3, 4, 5), (0, 1, 2, 4, 5, 7, 8, 9)]}
+(0, 1, 2, 3, 4, 5) / (0, 1, 2, 4, 5, 7, 8, 9) ......... 6.058%
+cea_cp_cc_low_left -> (2.8962 + 1.3803 x - 2.9592 y - 0.22743 x^2 - 0.33389 xy + y^2) / (0.00035841 + 0.00018935 x - 0.00050605 y - 8.3745e-05 xy + 0.00023873 y^2 - 1.9483e-05 x^2 y + 2.0741e-05 xy^2 + 2.2767e-05 y^3)
     f64 x1 = ;
     f64 y1 = ;
     f64 x2 = ;
@@ -1332,62 +1828,107 @@ cea_Cp_low_left -> (2.8701 + 1.4321 x - 2.9517 y - 0.24204 x^2 - 0.35194 xy + y^
     f64 x2y1 = ;
     f64 x1y2 = ;
     f64 y3 = ;
-    f64 n0 = +2.8700843792143695;
-    f64 n1 = +1.4321259855091084;
-    f64 n2 = -2.951652427295875;
-    f64 n3 = -0.2420415412480568;
-    f64 n4 = -0.35193895657900276;
-    f64 d0 = +0.0003557287035334117;
-    f64 d1 = +0.00018934292736992974;
-    f64 d2 = -0.0005034451842726294;
-    f64 d4 = -7.726545211497027e-05;
-    f64 d5 = +0.00023583511725994315;
-    f64 d7 = -2.1317881064428632e-05;
-    f64 d8 = +1.85195099174797e-05;
-    f64 d9 = +2.336730752102996e-05;
+    f64 n0 = +2.8961711401281796;
+    f64 n1 = +1.380267785409765;
+    f64 n2 = -2.959235197532152;
+    f64 n3 = -0.22742870022761344;
+    f64 n4 = -0.33389437020718044;
+    f64 d0 = +0.00035840685034168327;
+    f64 d1 = +0.0001893546685822136;
+    f64 d2 = -0.0005060456120694603;
+    f64 d4 = -8.374514776956192e-05;
+    f64 d5 = +0.00023872791254781774;
+    f64 d7 = -1.948261122047713e-05;
+    f64 d8 = +2.07406108782002e-05;
+    f64 d9 = +2.276707960740409e-05;
     f64 Num = n0 + n1*x1 + n2*y1 + n3*x2 + n4*x1y1 + y2;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d7*x2y1 + d8*x1y2 + d9*y3;
     return Num / Den;
 
-cea_Cp_low_right: {'spec': [(0, 1, 2, 5), (0, 1, 2, 4, 5, 8)]}
-(0, 1, 2, 5) / (0, 1, 2, 4, 5, 8) ..................... 3.88%
-cea_Cp_low_right -> (4.2959 + 0.28908 x - 3.3675 y + y^2) / (0.00059786 + 7.1828e-05 x - 0.00074156 y - 4.2894e-05 xy + 0.00037331 y^2 + 1.8653e-05 xy^2)
+cea_cp_cc_low_right: {'spec': [(0, 1, 2, 5), (0, 1, 2, 4, 5, 8)]}
+(0, 1, 2, 5) / (0, 1, 2, 4, 5, 8) ..................... 3.875%
+cea_cp_cc_low_right -> (4.2606 + 0.28647 x - 3.3469 y + y^2) / (0.00059783 + 7.1533e-05 x - 0.00074669 y - 4.2802e-05 xy + 0.00037648 y^2 + 1.8535e-05 xy^2)
     f64 x1 = ;
     f64 y1 = ;
     f64 x1y1 = ;
     f64 y2 = ;
     f64 x1y2 = ;
-    f64 n0 = +4.295929211019145;
-    f64 n1 = +0.28907793370196055;
-    f64 n2 = -3.367483987949862;
-    f64 d0 = +0.0005978622331052173;
-    f64 d1 = +7.182771715581137e-05;
-    f64 d2 = -0.0007415570025024972;
-    f64 d4 = -4.289368017656845e-05;
-    f64 d5 = +0.00037331217091959564;
-    f64 d8 = +1.8653015095784888e-05;
+    f64 n0 = +4.2606478633549125;
+    f64 n1 = +0.286474125290797;
+    f64 n2 = -3.346916554110677;
+    f64 d0 = +0.0005978252239739312;
+    f64 d1 = +7.15329555395512e-05;
+    f64 d2 = -0.0007466904302128527;
+    f64 d4 = -4.2802043949574985e-05;
+    f64 d5 = +0.0003764818378455317;
+    f64 d8 = +1.8535400055226076e-05;
     f64 Num = n0 + n1*x1 + n2*y1 + y2;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d8*x1y2;
     return Num / Den;
 
 cea_Mw: {'spec': [(0, 1, 3, 4, 5), (1, 2, 3, 5)]}
-(0, 1, 3, 4, 5) / (1, 2, 3, 5) ........................ 3.314%
-cea_Mw -> (0.21024 + 0.74869 x + 0.0037435 x^2 + 0.13463 xy + y^2) / (61.586 x + 68.421 y + 0.031774 x^2 + 30.142 y^2)
+(0, 1, 3, 4, 5) / (1, 2, 3, 5) ........................ 3.286%
+cea_Mw -> (0.21183 + 0.73935 x + 0.0044777 x^2 + 0.13399 xy + y^2) / (60.847 x + 68.522 y + 0.086728 x^2 + 30.139 y^2)
     f64 x1 = ;
     f64 y1 = ;
     f64 x2 = ;
     f64 x1y1 = ;
     f64 y2 = ;
-    f64 n0 = +0.21024398321396112;
-    f64 n1 = +0.7486891502942208;
-    f64 n3 = +0.0037434970654549094;
-    f64 n4 = +0.1346327815444957;
-    f64 d1 = +61.5856277715907;
-    f64 d2 = +68.42132631506553;
-    f64 d3 = +0.03177433731792165;
-    f64 d5 = +30.142213791419902;
+    f64 n0 = +0.21182839008473092;
+    f64 n1 = +0.7393450040280863;
+    f64 n3 = +0.004477743899937738;
+    f64 n4 = +0.13398511532142252;
+    f64 d1 = +60.84686567413254;
+    f64 d2 = +68.52163215322909;
+    f64 d3 = +0.08672790956340412;
+    f64 d5 = +30.13870865656756;
     f64 Num = n0 + n1*x1 + n3*x2 + n4*x1y1 + y2;
     f64 Den = d1*x1 + d2*y1 + d3*x2 + d5*y2;
+    return Num / Den;
+
+Ivac using LUT
+40 elements [2,10,2]
+3.67 %error
+ofr (biased):
+[ 0.5                1.888888888888889  3.277777777777778
+  4.666666666666666  6.055555555555555  7.444444444444445
+  8.833333333333332 10.222222222222221 11.61111111111111
+ 13.               ]
+data:
+[[[126.1773681640625  174.53619384765625]
+  [157.9001007080078  213.9551544189453 ]
+  [182.354736328125   235.49440002441406]
+  [201.67176818847656 262.7115173339844 ]
+  [206.6666717529297  275.6676940917969 ]
+  [205.1580047607422  280.71356201171875]
+  [202.00814819335938 280.4179382324219 ]
+  [198.87869262695312 275.9123229980469 ]
+  [196.01426696777344 270.4587097167969 ]
+  [193.40469360351562 265.0764465332031 ]]
+
+ [[131.6615753173828  182.00814819335938]
+  [164.42405700683594 223.80224609375   ]
+  [182.57899475097656 240.7645263671875 ]
+  [202.70132446289062 263.05810546875   ]
+  [211.09072875976562 277.2680969238281 ]
+  [213.28236389160156 284.69927978515625]
+  [211.08053588867188 287.3496398925781 ]
+  [207.4923553466797  282.7420959472656 ]
+  [203.761474609375   275.45361328125   ]
+  [200.18348693847656 268.7767639160156 ]]]
+
+atmos_Pa: {'spec': [(0, 1, 2), (0, 1, 2)]}
+(0, 1, 2) / (0, 1, 2) ................................. 1.459%
+atmos_Pa -> (4.1634e+09 - 1.2755e+05 x + x^2) / (53824 - 3.397 x + 6.7098e-05 x^2)
+    f64 x1 = ;
+    f64 x2 = ;
+    f64 n0 = +4163420288.511369;
+    f64 n1 = -127550.45177127342;
+    f64 d0 = +53823.7243981808;
+    f64 d1 = -3.3969727188689047;
+    f64 d2 = +6.709829651497073e-05;
+    f64 Num = n0 + n1*x1 + x2;
+    f64 Den = d0 + d1*x1 + d2*x2;
     return Num / Den;
 
     """

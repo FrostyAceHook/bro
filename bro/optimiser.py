@@ -4,9 +4,7 @@ from math import pi
 
 import numpy as np
 import matplotlib.pyplot as plt
-import rocketcea
 from CoolProp.CoolProp import PropsSI
-from rocketcea.cea_obj_w_units import CEA_Obj
 
 from . import bridge
 
@@ -63,83 +61,6 @@ def frozen(cls):
 
 
 
-class Ingredient:
-    TEMPERATURE = 293.15
-
-    def __init__(self, kind, name, composition, hf, rho):
-        self.name = name
-
-        # use the same kind detection as nasa cea fortran code.
-        if kind[:2] == "fu":
-            kind = "fu"
-            adder = rocketcea.cea_obj.add_new_fuel
-        elif kind[:2] == "ox":
-            kind = "ox"
-            adder = rocketcea.cea_obj.add_new_oxidizer
-        else:
-            assert False, "invalid kind"
-        adder(name,
-            f"{kind} {name} {composition}\n"
-            f"h,kc={hf:.1f}\n"
-            f"t,k={self.TEMPERATURE}\n"
-            f"rho,kg={rho:.1f}\n"
-        )
-
-class Fuel(Ingredient):
-    def __init__(self, name, composition, hf, rho):
-        """
-        name ......... unique string id.
-        composition .. string of chemical formula, of the form "X0 N0 X1 N1 ..." where
-                       Xn is atomic symbol and Nn is number of atoms.
-        hf .......... enthalpy of formation, in kcal/mol.
-        rho ......... density at `Fuel.TEMPERATURE`, in kg/m^3.
-        """
-        super().__init__("fu", name, composition, hf, rho)
-
-class Oxidiser(Ingredient):
-    def __init__(self, name, composition, hf, rho):
-        """
-        name ......... unique string id.
-        composition .. string of chemical formula, of the form "X0 N0 X1 N1 ..." where
-                       Xn is atomic symbol and Nn is number of atoms.
-        hf .......... enthalpy of formation, in kcal/mol.
-        rho ......... density at `Oxidiser.TEMPERATURE`, in kg/m^3.
-        """
-        super().__init__("ox", name, composition, hf, rho)
-
-    def prop(self, *args):
-        """
-        Forwards to PropsSI for this oxidiser.
-        """
-        return PropsSI(*args, self.name)
-
-class FuOx:
-    def __init__(self, fuel, ox, a0, n):
-        """
-        fuel ... Fuel object.
-        ox ..... Oxidiser object.
-        a0 ..... regression rate coefficient.
-        n ...... regression rate exponent.
-        """
-        self.fuel = fuel
-        self.ox = ox
-        self.a0 = a0
-        self.n = n
-
-    def __repr__(self):
-        return f"<FuOx: {self.fuel.name}+{self.ox.name}>"
-
-
-# Compositions and enthalpy of formation from Hybrid Rocket Propulsion Handbook, Karp & Jens.
-PARAFFIN = Fuel("PARAFFIN", "C 32 H 66", hf=-224.2, rho=924.5)
-NOX = Oxidiser("N2O", "N 2 O 1", hf=15.5,
-               rho=PropsSI("D", "T", Oxidiser.TEMPERATURE, "Q", 0, "N2O"))
-
-# Regression rate data for paraffin and NOX, from Hybrid Rocket Propulsion Handbook, Karp & Jens.
-PARAFFIN_NOX = FuOx(fuel=PARAFFIN, ox=NOX, a0=1.55e-4, n=0.5)
-
-
-
 
 @singleton
 class INPUT:
@@ -184,7 +105,6 @@ output variables are swept over a range and the optimal choice is kept.
         """
 
         s.target_apogee = INPUT # [m]
-        s.fuox = INPUT # must be `PARAFFIN_NOX`
 
         s.locked_mass = INPUT # [kg]
         s.locked_length = INPUT # [m]
@@ -202,8 +122,8 @@ output variables are swept over a range and the optimal choice is kept.
         s.tank_temperature = ... # [K, over time]
         s.tank_pressure = ... # [Pa, over time]
 
+        s.ox_type = INPUT # must be "N2O"
         s.ox_volume_fill_frac = INPUT # [-]
-        s.ox_worstcase_temperature = INPUT # [K]
         s.ox_mass = ... # [kg, over time]
         s.ox_mass_liquid = ... # [kg, over time]
         s.ox_mass_vapour = ... # [kg, over time]
@@ -234,6 +154,7 @@ output variables are swept over a range and the optimal choice is kept.
         s.cc_wall_mass = ... # [kg]
         s.cc_wall_com = ... # [m]
 
+        s.fuel_type = INPUT # must be "PARAFFIN"
         s.fuel_length = OUTPUT # [m]
         s.fuel_initial_thickness = OUTPUT # [m]
         s.fuel_mass = ... # [kg, over time]
@@ -438,11 +359,6 @@ def simulate_burn(s):
     - nozzle_exit_area
     """
 
-    # Fuel and ox objects.
-    assert s.fuox is PARAFFIN_NOX
-    fuel = s.fuox.fuel
-    ox = s.fuox.ox
-
     # Coupla cylinders.
     fuel_cyl = Cylinder.pipe(s.fuel_length, outer_diameter=s.cc_diameter)
     fuel_cyl.thickness = s.fuel_initial_thickness
@@ -527,9 +443,10 @@ def simulate_burn(s):
         cp_a=cp_a,
     )
     # Send it.
-    _start_time = time.time()
+    _start = time.perf_counter()
     count = state.sim()
-    print(f"Finished burn sim in {time.time() - _start_time:.3g}s")
+    _end = time.perf_counter()
+    print(f"Finished burn sim in {1e3*(_end - _start):.3f}ms")
 
     # Trim unused memory.
     t       = t[:count]
@@ -586,11 +503,11 @@ def simulate_burn(s):
     P_t = np.zeros(len(T_t), dtype=float)
     # saturated pressure:
     Pmask = (m_l > NEGLIGIBLE_MASS)
-    Psat = [ox.prop("P", "T", T, "Q", 0) for T in T_t[Pmask]]
+    Psat = [PropsSI("P", "T", T, "Q", 0, "N2O") for T in T_t[Pmask]]
     P_t[Pmask] = Psat
     # not:
     Pmask = ~Pmask & (m_v > NEGLIGIBLE_MASS)
-    Pnot = [ox.prop("P", "T", T, "D", m / V_t) for T, m in zip(T_t[Pmask], m_v[Pmask])]
+    Pnot = [PropsSI("P", "T", T, "D", m / V_t, "N2O") for T, m in zip(T_t[Pmask], m_v[Pmask])]
     P_t[Pmask] = Pnot
 
     ofr = np.zeros(len(T_t), dtype=float)
@@ -693,7 +610,9 @@ def cost(s):
             raise ValueError("expected all independants set, got unset: "
                     f"sys[{repr(name)}]")
 
-    assert s.fuox is PARAFFIN_NOX
+    # Fuel and ox types.
+    assert s.ox_type == "N2O"
+    assert s.fuel_type == "PARAFFIN"
 
 
     # Firstly get the easy masses/coms/length out of the way.
@@ -704,8 +623,7 @@ def cost(s):
     top += s.locked_length
 
 
-    # Find worst-case initial saturated tank pressure, which is the max tank pressure.
-    tank_max_pressure = s.fuox.ox.prop("P", "T", s.ox_worstcase_temperature, "Q", 0)
+    tank_max_pressure = 7.245e6 # [Pa], N2O critical pressure.
     # Determine tank specs from the max pressure.
     tank_wall_cyl = Cylinder.pipe(s.tank_inner_length, outer_diameter=s.rocket_diameter)
     tank_wall_cyl.set_thickness_for_stress(tank_max_pressure,

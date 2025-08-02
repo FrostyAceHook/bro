@@ -1,5 +1,5 @@
 """
-Builds all '.pyx' files in './bro'.
+Builds the 'bro/bridge.pyx' file.
 """
 
 import os

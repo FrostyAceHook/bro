@@ -13,7 +13,6 @@ def main():
     s = optimiser.Sys()
 
     s.target_apogee = 30000 / 3.281 # [m]
-    s.fuox = optimiser.PARAFFIN_NOX # required.
 
     s.locked_mass = 5.0 # [kg]
     s.locked_length = 2.0 # [m]
@@ -24,8 +23,8 @@ def main():
     s.tank_wall_yield_strength = 241e6 # Al6061, [Pa]
     s.tank_wall_specific_heat_capacity = 896 # Al6061, [J/kg/K]
 
+    s.ox_type = "N2O" # required.
     s.ox_volume_fill_frac = 0.8 # [-]
-    s.ox_worstcase_temperature = 35 + 273.15 # 36.4dC is critical temp of N2O, [K]
 
     s.mov_mass = 0.5 # [kg]
     s.mov_length = 0.1 # [m]
@@ -42,6 +41,7 @@ def main():
     s.cc_wall_density = 2720.0 # Al6061, [kg/m^3]
     s.cc_wall_yield_strength = 241e6 # Al6061, [Pa]
 
+    s.fuel_type = "PARAFFIN" # required.
     s.fuel_length = 0.25 # [m], OUTPUT
     s.fuel_initial_thickness = 0.02 # [m], OUTPUT
 

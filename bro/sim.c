@@ -19,11 +19,15 @@ typedef float   f32;  // 32-bit floating-point number (IEEE-754).
 typedef double  f64;  // 64-bit floating-point number (IEEE-754).
 
 
-#if (defined(BR_NO_ASSERT) && BR_NO_ASSERT)
+#if (defined(BR_NO_ASSERTS) && BR_NO_ASSERTS)
 
 #define assertion_failed() (0)
-#define assertx(x, extra, ...) do { (void)(x); } while (0)
-#define assert(x) do { (void)(x); } while (0)
+#define assertx(x, extra, ...) do {         \
+        if (!(x)) __builtin_unreachable();  \
+    } while (0)
+#define assert(x) do {                      \
+        if (!(x)) __builtin_unreachable();  \
+    } while (0)
 
 #else
 
@@ -48,7 +52,8 @@ static jmp_buf _assert_jump;
 #endif
 
 
-#if (defined(BR_HAVEALOOK) && BR_HAVEALOOK)
+#if (defined(BR_HAVEALOOK) && BR_HAVEALOOK) && \
+    (!defined(BR_DONTLOOK) || !BR_DONTLOOK)
   #define local __attribute((__used__)) static
 #else
   #define local static
@@ -203,13 +208,22 @@ local f64 br_pow(f64 x, f64 y) {
     //  x   = 2^log2(x)
     //  x^y = (2^log2(x))^y
     //      = 2^(log2(x) * y)
-    assertx(x >= 0.0, "x=%f", x);
+    assertx(x > 0.0, "x=%f", x);
     return br_exp2(br_log2(x) * y);
 }
 
 // Returns `x^0.5`, requiring the compiler to be using an instruction set that
 // has a sqrt instrinsic bc i cant be bothered to impl it myself.
 local f64 br_sqrt(f64 x) {
+    // Gaslight the compiler into not caring about the signbit. I think it
+    // refuses to unconditionally send the intrinsic bc it respects signed zeros
+    // whereas we compile without. But like, i dont care, i just want the
+    // instruction. Anyway adding the unreachable-if-signedbit causes gcc to only
+    // emit the instruction without a check-if-zero-then-send-to-stdlib-impl so
+    // solved.
+    assertx(!__builtin_signbit(x), "x=%f", x);
+    if (__builtin_signbit(x))
+        __builtin_unreachable();
     return __builtin_sqrt(x);
 }
 
@@ -225,43 +239,43 @@ local f64 br_fabs(f64 x) {
 
 
 
-// Nitrous oxide properties from CoolProp, approximated via rational polynomials
-// by 'bro/approximator.py'.
+// N2O properties from CoolProp, approximated via rational polynomials by
+// 'bro/approximator.py'.
 
-// All nox properties are only valid for saturated liquid-vapour mixtures
+// All N2O properties are only valid for saturated liquid-vapour mixtures
 // (including qualities of exactly 0 or 1), and vapour. Note the whats up
 // everybody points:
-//   nox triple point:     182.34 K  0.08785 MPa
-//   nox critical point:   309.55 K  7.245 MPa
+//   N2O triple point:     182.34 K  0.08785 MPa
+//   N2O critical point:   309.55 K  7.245 MPa
 // Therefore we define our bounds as:
 //  temperature      183 K .. 309 K
 //  pressure        90 kPa .. 7.2 MPa
 //  vap. density   1 kg/m3 .. 325 kg/m3
 // Note that all inputs and outputs are base si.
 
-#define NOX_IN_T(T) (183 <= (T) && (T) <= 309)
-#define NOX_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
-#define NOX_IN_rho(rho) (1 <= (rho) && (rho) <= 325)
+#define N2O_IN_T(T) (183 <= (T) && (T) <= 309)
+#define N2O_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
+#define N2O_IN_rho(rho) (1 <= (rho) && (rho) <= 325)
 
-#define NOX_ASSERT_IN_T(T) assertx(NOX_IN_T((T)), "T=%fK", (T))
-#define NOX_ASSERT_IN_P(P) assertx(NOX_IN_P((P)), "P=%fMPa", (P))
-#define NOX_ASSERT_IN_Trho(T, rho) do {                                 \
-        assertx(NOX_IN_T((T)), "T=%fK, rho=%fkg/m3", (T), (rho));       \
-        assertx(NOX_IN_rho((rho)), "T=%fK, rho=%fkg/m3", (T), (rho));   \
+#define N2O_ASSERT_IN_T(T) assertx(N2O_IN_T((T)), "T=%fK", (T))
+#define N2O_ASSERT_IN_P(P) assertx(N2O_IN_P((P)), "P=%fMPa", (P))
+#define N2O_ASSERT_IN_Trho(T, rho) do {                                 \
+        assertx(N2O_IN_T((T)), "T=%fK, rho=%fkg/m3", (T), (rho));       \
+        assertx(N2O_IN_rho((rho)), "T=%fK, rho=%fkg/m3", (T), (rho));   \
     } while (0)
-#define NOX_ASSERT_IN_TP(T, P) do {                         \
-        assertx(NOX_IN_T((T)), "T=%fK, P=%fMPa", (T), (P)); \
-        assertx(NOX_IN_P((P)), "T=%fK, P=%fMPa", (T), (P)); \
+#define N2O_ASSERT_IN_TP(T, P) do {                         \
+        assertx(N2O_IN_T((T)), "T=%fK, P=%fMPa", (T), (P)); \
+        assertx(N2O_IN_P((P)), "T=%fK, P=%fMPa", (T), (P)); \
     } while (0)
 
 
 
-#define NOX_Mw (44.013e-3) // [kg/mol]
-#define NOX_R (GAS_CONSTANT / NOX_Mw) // [J/kg/K]
+#define N2O_Mw (44.013e-3) // [kg/mol]
+#define N2O_R (GAS_CONSTANT / N2O_Mw) // [J/kg/K]
 
-local f64 nox_Tsat(f64 P) {
+local f64 N2O_Tsat(f64 P) {
     P *= 1e-6; // Pa -> MPa
-    NOX_ASSERT_IN_P(P);
+    N2O_ASSERT_IN_P(P);
     f64 x1 = P;
     f64 x2 = P*P;
     f64 n0 = +1.053682149480346;
@@ -274,8 +288,8 @@ local f64 nox_Tsat(f64 P) {
     return Num / Den;
 }
 
-local f64 nox_rho_satliq(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_rho_satliq(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 n0 = +122309.80087089837;
@@ -288,8 +302,8 @@ local f64 nox_rho_satliq(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_rho_satvap(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_rho_satvap(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 x4 = x2*x2;
@@ -304,8 +318,8 @@ local f64 nox_rho_satvap(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_Psat(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_Psat(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 x3 = x2*T;
@@ -316,8 +330,8 @@ local f64 nox_Psat(f64 T) {
     return c1*x1 + c3*x3 + c5*x5;
 }
 
-local f64 nox_P(f64 T, f64 rho) {
-    NOX_ASSERT_IN_Trho(T, rho);
+local f64 N2O_P(f64 T, f64 rho) {
+    N2O_ASSERT_IN_Trho(T, rho);
     f64 x1 = T;
     f64 y2 = rho*rho;
     f64 x2y1 = T*T*rho;
@@ -330,9 +344,9 @@ local f64 nox_P(f64 T, f64 rho) {
     return Num / Den;
 }
 
-local f64 nox_s_satliq(f64 P) {
+local f64 N2O_s_satliq(f64 P) {
     P *= 1e-6; // Pa -> MPa
-    NOX_ASSERT_IN_P(P);
+    N2O_ASSERT_IN_P(P);
     f64 x1 = P;
     f64 x2 = P*P;
     f64 x4 = x2*x2;
@@ -348,9 +362,9 @@ local f64 nox_s_satliq(f64 P) {
     return Num / Den;
 }
 
-local f64 nox_s_satvap(f64 P) {
+local f64 N2O_s_satvap(f64 P) {
     P *= 1e-6; // Pa -> MPa
-    NOX_ASSERT_IN_P(P);
+    N2O_ASSERT_IN_P(P);
     f64 x1 = P;
     f64 x2 = P*P;
     f64 x3 = x2*P;
@@ -365,9 +379,9 @@ local f64 nox_s_satvap(f64 P) {
     return Num / Den;
 }
 
-local f64 nox_cp(f64 T, f64 P) {
+local f64 N2O_cp(f64 T, f64 P) {
     P *= 1e-6; // Pa -> MPa
-    NOX_ASSERT_IN_TP(T, P);
+    N2O_ASSERT_IN_TP(T, P);
     f64 x1 = T;
     f64 y1 = P;
     f64 x2 = T*T;
@@ -383,8 +397,8 @@ local f64 nox_cp(f64 T, f64 P) {
     return Num / Den;
 }
 
-local f64 nox_cv_satliq(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_cv_satliq(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 x3 = x2*T;
@@ -398,8 +412,8 @@ local f64 nox_cv_satliq(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_cv_satvap(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_cv_satvap(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 x3 = x2*T;
@@ -412,9 +426,9 @@ local f64 nox_cv_satvap(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_cv(f64 T, f64 P) {
+local f64 N2O_cv(f64 T, f64 P) {
     P *= 1e-6; // Pa -> MPa
-    NOX_ASSERT_IN_TP(T, P);
+    N2O_ASSERT_IN_TP(T, P);
     f64 x1 = T;
     f64 y1 = P;
     f64 x2 = T*T;
@@ -431,8 +445,8 @@ local f64 nox_cv(f64 T, f64 P) {
     return Num / Den;
 }
 
-local f64 nox_h_satliq(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_h_satliq(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x3 = T*T*T;
     f64 x4 = x3*T;
@@ -446,8 +460,8 @@ local f64 nox_h_satliq(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_h_satvap(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_h_satvap(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 x4 = x2*x2;
@@ -461,8 +475,8 @@ local f64 nox_h_satvap(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_h(f64 T, f64 rho) {
-    NOX_ASSERT_IN_Trho(T, rho);
+local f64 N2O_h(f64 T, f64 rho) {
+    N2O_ASSERT_IN_Trho(T, rho);
     f64 x1 = T;
     f64 y1 = rho;
     f64 x2 = T*T;
@@ -475,8 +489,8 @@ local f64 nox_h(f64 T, f64 rho) {
     return Num / Den;
 }
 
-local f64 nox_u_satliq(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_u_satliq(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 x3 = x2*T;
@@ -490,8 +504,8 @@ local f64 nox_u_satliq(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_u_satvap(f64 T) {
-    NOX_ASSERT_IN_T(T);
+local f64 N2O_u_satvap(f64 T) {
+    N2O_ASSERT_IN_T(T);
     f64 x1 = T;
     f64 x2 = T*T;
     f64 x4 = x2*x2;
@@ -505,8 +519,8 @@ local f64 nox_u_satvap(f64 T) {
     return Num / Den;
 }
 
-local f64 nox_u(f64 T, f64 rho) {
-    NOX_ASSERT_IN_Trho(T, rho);
+local f64 N2O_u(f64 T, f64 rho) {
+    N2O_ASSERT_IN_Trho(T, rho);
     f64 x1 = T;
     f64 y1 = rho;
     f64 x2 = T*T;
@@ -520,8 +534,8 @@ local f64 nox_u(f64 T, f64 rho) {
     return Num / Den;
 }
 
-local f64 nox_Z(f64 T, f64 rho) {
-    NOX_ASSERT_IN_Trho(T, rho);
+local f64 N2O_Z(f64 T, f64 rho) {
+    N2O_ASSERT_IN_Trho(T, rho);
     f64 y1 = rho;
     f64 x1y1 = T*rho;
     f64 y2 = rho*rho;
@@ -534,28 +548,37 @@ local f64 nox_Z(f64 T, f64 rho) {
 
 
 
-// Paraffin+NOx CEA results from rocketcea, approximated via rational polynomials
-// by 'bro/approximator.py'.
+// Paraffin+N2O CEA results from rocketcea, approximated via rational polynomials
+// and look-up-tables-with-biasing(tm) by 'bro/approximator.py'.
 
 // For the bounds of the inputs, we use:
-//  chamber pressure  90 kPa .. 7.2 Mpa
-//  ox-fuel ratio        0.5 .. 13
+//  chamber pressure     90 kPa .. 7.2 Mpa
+//  ox-fuel ratio           0.5 .. 13
+//  exit-throat area ratio  1.2 .. 12
 // Note that all inputs and outputs are base si.
 
 #define CEA_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
 #define CEA_IN_ofr(ofr) (0.5 <= (ofr) && (ofr) <= 13)
+#define CEA_IN_eps(eps) (1.2 <= (eps) && (eps) <= 12)
 
 #define CEA_ASSERT_IN_P(P) assertx(CEA_IN_P((P)), "P=%fMPa", (P))
 #define CEA_ASSERT_IN_ofr(ofr) assertx(CEA_IN_ofr((ofr)), "ofr=%f", (ofr))
-#define CEA_ASSERT_IN_Prho(P, rho) do {                             \
-        assertx(NOX_IN_P((P)), "P=%fMPa, ofr=%f", (P), (ofr));      \
-        assertx(NOX_IN_rho((rho)), "P=%fMPa, ofr=%f", (P), (ofr));  \
+#define CEA_ASSERT_IN_Pofr(P, ofr) do {                             \
+        assertx(CEA_IN_P((P)), "P=%fMPa, ofr=%f", (P), (ofr));      \
+        assertx(CEA_IN_ofr((ofr)), "P=%fMPa, ofr=%f", (P), (ofr));  \
+    } while (0)
+#define CEA_ASSERT_IN_Pofreps(P, ofr, eps) do {                                 \
+        assertx(CEA_IN_P((P)), "P=%fMPa, ofr=%f, eps=%f", (P), (ofr), (eps));   \
+        assertx(CEA_IN_ofr((ofr)), "P=%fMPa, ofr=%f, eps=%f", (P), (ofr),       \
+                (eps));                                                         \
+        assertx(CEA_IN_eps((eps)), "P=%fMPa, ofr=%f, eps=%f", (P), (ofr),       \
+                (eps));                                                         \
     } while (0)
 
 
 local f64 cea_T(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
-    CEA_ASSERT_IN_Prho(P, ofr);
+    CEA_ASSERT_IN_Pofr(P, ofr);
     // Different approxs for different input regions.
     if (ofr >= 4) {
         f64 x1 = P;
@@ -564,15 +587,15 @@ local f64 cea_T(f64 P, f64 ofr) {
         f64 y2 = ofr*ofr;
         f64 x2y1 = x1y1*P;
         f64 x1y2 = x1y1*ofr;
-        f64 n0 = -14.286699845712628;
-        f64 n1 = -32.4062851919402;
-        f64 n2 = +3.4742076078850297;
-        f64 n4 = +18.309776531751787;
-        f64 d1 = +0.008300237024458222;
-        f64 d4 = +0.001385352578317833;
-        f64 d5 = +0.00041962485459847375;
-        f64 d7 = -4.215277067475584e-06;
-        f64 d8 = +0.00023245123290958759;
+        f64 n0 = -14.288432205175953;
+        f64 n1 = -32.42867599262846;
+        f64 n2 = +3.474751778815847;
+        f64 n4 = +18.31561738023227;
+        f64 d1 = +0.008295564068249973;
+        f64 d4 = +0.0013866109147024212;
+        f64 d5 = +0.0004196407872643308;
+        f64 d7 = -4.217470292937784e-06;
+        f64 d8 = +0.00023248363130312795;
         f64 Num = n0 + n1*x1 + n2*y1 + n4*x1y1 + y2;
         f64 Den = d1*x1 + d4*x1y1 + d5*y2 + d7*x2y1 + d8*x1y2;
         return Num / Den;
@@ -580,12 +603,12 @@ local f64 cea_T(f64 P, f64 ofr) {
     f64 x1 = P;
     f64 y1 = ofr;
     f64 x1y1 = P*ofr;
-    f64 n0 = +4.625880807530353;
-    f64 n1 = +4.240967496861169;
-    f64 d0 = +0.0062645868710667785;
-    f64 d1 = +0.003833484131106042;
-    f64 d2 = -0.0006506284584737187;
-    f64 d4 = -0.0005047873316636391;
+    f64 n0 = +4.626249969485239;
+    f64 n1 = +4.2414906007771505;
+    f64 d0 = +0.006265099088905423;
+    f64 d1 = +0.0038339663921447076;
+    f64 d2 = -0.0006507452327885072;
+    f64 d4 = -0.0005048607265830429;
     f64 Num = n0 + n1*x1 + y1;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1;
     return Num / Den;
@@ -593,7 +616,7 @@ local f64 cea_T(f64 P, f64 ofr) {
 
 local f64 cea_cp(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
-    CEA_ASSERT_IN_Prho(P, ofr);
+    CEA_ASSERT_IN_Pofr(P, ofr);
     // Different approxs for different input regions.
     if (ofr >= 4) {
         f64 x1 = P;
@@ -603,17 +626,17 @@ local f64 cea_cp(f64 P, f64 ofr) {
         f64 x2y1 = x1y1*P;
         f64 x1y2 = x1y1*ofr;
         f64 y3 = ofr*ofr*ofr;
-        f64 n1 = +3582.944641587491;
-        f64 n4 = -907.659602547744;
-        f64 n6 = +0.8638673972095523;
-        f64 n7 = -3.09295057735193;
-        f64 n8 = +70.73570153378617;
-        f64 d0 = +0.06115388267778262;
-        f64 d1 = +1.9517349532470427;
-        f64 d2 = -0.012085905000346658;
-        f64 d4 = -0.47145131429742476;
-        f64 d8 = +0.03175824988676035;
-        f64 d9 = +0.0002303751013953221;
+        f64 n1 = +3697.2499992698126;
+        f64 n4 = -936.4542475610451;
+        f64 n6 = +0.9270759227273586;
+        f64 n7 = -3.2824223104827146;
+        f64 n8 = +73.08080264333545;
+        f64 d0 = +0.06117125463913653;
+        f64 d1 = +2.017096527865246;
+        f64 d2 = -0.012091433831058363;
+        f64 d4 = -0.4872595016883579;
+        f64 d8 = +0.03283582431629867;
+        f64 d9 = +0.00022931797763498784;
         f64 Num = n1*x1 + n4*x1y1 + n6*x3 + n7*x2y1 + n8*x1y2 + y3;
         f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d8*x1y2 + d9*y3;
         return Num / Den;
@@ -624,15 +647,15 @@ local f64 cea_cp(f64 P, f64 ofr) {
         f64 x1y1 = P*ofr;
         f64 y2 = ofr*ofr;
         f64 x1y2 = x1y1*ofr;
-        f64 n0 = +4.295929211019145;
-        f64 n1 = +0.28907793370196055;
-        f64 n2 = -3.367483987949862;
-        f64 d0 = +0.0005978622331052173;
-        f64 d1 = +7.182771715581137e-05;
-        f64 d2 = -0.0007415570025024972;
-        f64 d4 = -4.289368017656845e-05;
-        f64 d5 = +0.00037331217091959564;
-        f64 d8 = +1.8653015095784888e-05;
+        f64 n0 = +4.2606478633549125;
+        f64 n1 = +0.286474125290797;
+        f64 n2 = -3.346916554110677;
+        f64 d0 = +0.0005978252239739312;
+        f64 d1 = +7.15329555395512e-05;
+        f64 d2 = -0.0007466904302128527;
+        f64 d4 = -4.2802043949574985e-05;
+        f64 d5 = +0.0003764818378455317;
+        f64 d8 = +1.8535400055226076e-05;
         f64 Num = n0 + n1*x1 + n2*y1 + y2;
         f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d8*x1y2;
         return Num / Den;
@@ -645,19 +668,19 @@ local f64 cea_cp(f64 P, f64 ofr) {
     f64 x2y1 = x1y1*P;
     f64 x1y2 = x1y1*ofr;
     f64 y3 = y2*ofr;
-    f64 n0 = +2.8700843792143695;
-    f64 n1 = +1.4321259855091084;
-    f64 n2 = -2.951652427295875;
-    f64 n3 = -0.2420415412480568;
-    f64 n4 = -0.35193895657900276;
-    f64 d0 = +0.0003557287035334117;
-    f64 d1 = +0.00018934292736992974;
-    f64 d2 = -0.0005034451842726294;
-    f64 d4 = -7.726545211497027e-05;
-    f64 d5 = +0.00023583511725994315;
-    f64 d7 = -2.1317881064428632e-05;
-    f64 d8 = +1.85195099174797e-05;
-    f64 d9 = +2.336730752102996e-05;
+    f64 n0 = +2.8961711401281796;
+    f64 n1 = +1.380267785409765;
+    f64 n2 = -2.959235197532152;
+    f64 n3 = -0.22742870022761344;
+    f64 n4 = -0.33389437020718044;
+    f64 d0 = +0.00035840685034168327;
+    f64 d1 = +0.0001893546685822136;
+    f64 d2 = -0.0005060456120694603;
+    f64 d4 = -8.374514776956192e-05;
+    f64 d5 = +0.00023872791254781774;
+    f64 d7 = -1.948261122047713e-05;
+    f64 d8 = +2.07406108782002e-05;
+    f64 d9 = +2.276707960740409e-05;
     f64 Num = n0 + n1*x1 + n2*y1 + n3*x2 + n4*x1y1 + y2;
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d7*x2y1 + d8*x1y2 + d9*y3;
     return Num / Den;
@@ -665,24 +688,111 @@ local f64 cea_cp(f64 P, f64 ofr) {
 
 local f64 cea_Mw(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
-    CEA_ASSERT_IN_Prho(P, ofr);
+    CEA_ASSERT_IN_Pofr(P, ofr);
     f64 x1 = P;
     f64 y1 = ofr;
     f64 x2 = P*P;
     f64 x1y1 = P*ofr;
     f64 y2 = ofr*ofr;
-    f64 n0 = +0.21024398321396112;
-    f64 n1 = +0.7486891502942208;
-    f64 n3 = +0.0037434970654549094;
-    f64 n4 = +0.1346327815444957;
-    f64 d1 = +61.5856277715907;
-    f64 d2 = +68.42132631506553;
-    f64 d3 = +0.03177433731792165;
-    f64 d5 = +30.142213791419902;
+    f64 n0 = +0.21182839008473092;
+    f64 n1 = +0.7393450040280863;
+    f64 n3 = +0.004477743899937738;
+    f64 n4 = +0.13398511532142252;
+    f64 d1 = +60.84686567413254;
+    f64 d2 = +68.52163215322909;
+    f64 d3 = +0.08672790956340412;
+    f64 d5 = +30.13870865656756;
     f64 Num = n0 + n1*x1 + n3*x2 + n4*x1y1 + y2;
     f64 Den = d1*x1 + d2*y1 + d3*x2 + d5*y2;
     return Num / Den;
 }
+
+static f32 cea_Ivac_table[10][2][2] =
+    { { { 126.1773681640625,  174.53619384765625 },
+        { 131.6615753173828,  182.00814819335938 } },
+
+      { { 157.9001007080078,  213.9551544189453  },
+        { 164.42405700683594, 223.80224609375    } },
+
+      { { 182.354736328125,   235.49440002441406 },
+        { 182.57899475097656, 240.7645263671875  } },
+
+      { { 201.67176818847656, 262.7115173339844  },
+        { 202.70132446289062, 263.05810546875    } },
+
+      { { 206.6666717529297,  275.6676940917969  },
+        { 211.09072875976562, 277.2680969238281  } },
+
+      { { 205.1580047607422,  280.71356201171875 },
+        { 213.28236389160156, 284.69927978515625 } },
+
+      { { 202.00814819335938, 280.4179382324219  },
+        { 211.08053588867188, 287.3496398925781  } },
+
+      { { 198.87869262695312, 275.9123229980469  },
+        { 207.4923553466797,  282.7420959472656  } },
+
+      { { 196.01426696777344, 270.4587097167969  },
+        { 203.761474609375,   275.45361328125    } },
+
+      { { 193.40469360351562, 265.0764465332031  },
+        { 200.18348693847656, 268.7767639160156  } } };
+    // Possibly the hardest working 40 element lookup table ever constructed.
+local f64 cea_Ivac(f64 P, f64 ofr, f64 eps) {
+    P *= 1e-6; // Pa -> MPa
+
+    // P in 0.09..7.2, 2 points.
+    // ofr in 0.5..13, 10 points.
+    // eps in 1.2..12, 2 points.
+    // table in ofr,P,eps order (to allow loads which are always 32 contiguous
+    // bytes).
+    CEA_ASSERT_IN_Pofreps(P, ofr, eps);
+
+    // ofr needs typical lookup (note 0.0001 term added to avoid indexing oob).
+    i32 i = (i32)((ofr - 0.5) / (13.0 - 0.5) * (10.0 + 0.0001));
+    f64 ii = ofr - i;
+    // P and eps are biased before being looked up using some fuckass formula
+    // (https://www.desmos.com/calculator/okiztovx6y). Also note only two
+    // elements along P and eps, so no need to find table index.
+    f64 jj = -1.4 / (P + 1.1081069) + 1.1685101;
+    f64 kk = -3.3 / (eps + 1.4498447) + 1.245356;
+
+    f64 v000 = cea_Ivac_table[i][0][0];
+    f64 v001 = cea_Ivac_table[i][0][1];
+    f64 v010 = cea_Ivac_table[i][1][0];
+    f64 v011 = cea_Ivac_table[i][1][1];
+    f64 v100 = cea_Ivac_table[i + 1][0][0];
+    f64 v101 = cea_Ivac_table[i + 1][0][1];
+    f64 v110 = cea_Ivac_table[i + 1][1][0];
+    f64 v111 = cea_Ivac_table[i + 1][1][1];
+    return v000 * (1.0 - ii) * (1.0 - jj) * (1.0 - kk)
+         + v001 * (1.0 - ii) * (1.0 - jj) *        kk
+         + v010 * (1.0 - ii) *        jj  * (1.0 - kk)
+         + v011 * (1.0 - ii) *        jj  *        kk
+         + v100 *        ii  * (1.0 - jj) * (1.0 - kk)
+         + v101 *        ii  * (1.0 - jj) *        kk
+         + v110 *        ii  *        jj  * (1.0 - kk)
+         + v111 *        ii  *        jj  *        kk;
+}
+
+
+
+// Atmospheric pressure from some formulas idk, approximated via rational
+// polynomials by 'bro/approximator.py'.
+
+local f64 atmos_Pa(f64 altitude) {
+    f64 x1 = altitude + 10000.0; // need some offset to avoid /0.
+    f64 x2 = x1*x1;
+    f64 n0 = +4163420288.511369;
+    f64 n1 = -127550.45177127342;
+    f64 d0 = +53823.7243981808;
+    f64 d1 = -3.3969727188689047;
+    f64 d2 = +6.709829651497073e-05;
+    f64 Num = n0 + n1*x1 + x2;
+    f64 Den = d0 + d1*x1 + d2*x2;
+    return Num / Den;
+}
+
 
 
 
@@ -692,7 +802,7 @@ local f64 cea_Mw(f64 P, f64 ofr) {
 
 
 
-// Paraffin+NOx regression rate constants from Hybrid Rocket Propulsion Handbook,
+// Paraffin+N2O regression rate constants from Hybrid Rocket Propulsion Handbook,
 // Karp & Jens.
 
 #define RR_a0 (1.55e-4) // [-]
@@ -713,17 +823,8 @@ local f64 cea_Mw(f64 P, f64 ofr) {
 
 
 
-// Sim stopping mechanism/contraption.
-static jmp_buf _stop_jmp;
-#define sim_stopped() (setjmp(_stop_jmp))
-#define stop_sim() (longjmp(_stop_jmp, 1))
-
-
-
-// Sets the initial state of the system. Must have space left in the time-dep
-// buffers and must not have set any element of them.
+// Sets the initial state of the system. Must have space in the time-dep buffers.
 local void initial_state(broState* s) {
-    assertx(s->upto == 0, "upto=%d", s->upto);
     assertx(s->count >= 1, "count=%d", s->count);
 
     // Calculate initial state.
@@ -732,8 +833,8 @@ local void initial_state(broState* s) {
     f64 T0_t = s->T_a;
     f64 V0_l = s->V_t * s->vff0_o;
     f64 V0_v = s->V_t - V0_l;
-    f64 m0_l = V0_l * nox_rho_satliq(T0_t);
-    f64 m0_v = V0_v * nox_rho_satvap(T0_t);
+    f64 m0_l = V0_l * N2O_rho_satliq(T0_t);
+    f64 m0_v = V0_v * N2O_rho_satvap(T0_t);
 
     // Fuel inner diameter explicit param.
     f64 D0_f = s->D0_f;
@@ -755,16 +856,18 @@ local void initial_state(broState* s) {
     s->nmol_g[0] = nmol0_g;
     s->T_g[0] = T0_g;
     s->Cp_g[0] = Cp0_g;
-    ++s->upto;
+    s->upto = 1;
 }
 
 
 
 // Performs some discrete integrations of the system differential. Must have
-// space left in the time-dep buffers and must have some elements set in them.
-local void step_state(broState* s) {
+// some elements set in the time-dep buffers. Returns non-zero if the sim is
+// complete and should stop.
+local i32 step_state(broState* s) {
     assertx(s->upto >= 0, "upto=%d", s->upto);
-    assertx(s->count - s->upto >= 1, "count=%d, upto=%d", s->count, s->upto);
+    if (s->upto >= s->count) // dont buffer overflow.
+        return 1;
 
     // Current state variables.
     f64 T_t = s->T_t[s->upto - 1];
@@ -806,7 +909,7 @@ local void step_state(broState* s) {
 
         // Find injector flow rate.
 
-        f64 P_u = nox_Psat(T_t); // tank at saturated pressure.
+        f64 P_u = N2O_Psat(T_t); // tank at saturated pressure.
         f64 P_d = P_c;
 
         if (P_u <= CUTOFF_Pr * P_d)
@@ -815,23 +918,23 @@ local void step_state(broState* s) {
 
         // Single-phase incompressible model (with Beta = 0):
         // (assuming upstream density as the "incompressible" density)
-        f64 rho_u = nox_rho_satliq(T_t);
+        f64 rho_u = N2O_rho_satliq(T_t);
         f64 mdot_SPI = s->Cd_inj * s->A_inj * br_sqrt(2 * rho_u * (P_u - P_d));
 
         // Homogenous equilibrium model:
         // (assuming only saturated liquid leaving from upstream)
-        f64 s_u = nox_s_satliq(P_u);
-        f64 s_d_l = nox_s_satliq(P_d);
-        f64 s_d_v = nox_s_satvap(P_d);
+        f64 s_u = N2O_s_satliq(P_u);
+        f64 s_d_l = N2O_s_satliq(P_d);
+        f64 s_d_v = N2O_s_satvap(P_d);
         f64 x_d = (s_u - s_d_l) / (s_d_v - s_d_l);
         assert(0 <= x_d && x_d <= 1.0);
-        f64 h_u = nox_h_satliq(T_t);
-        f64 T_d = nox_Tsat(P_d); // since our prop funcs expect temp.
-        f64 h_d_l = nox_h_satliq(T_d);
-        f64 h_d_v = nox_h_satvap(T_d);
+        f64 h_u = N2O_h_satliq(T_t);
+        f64 T_d = N2O_Tsat(P_d); // since our prop funcs expect temp.
+        f64 h_d_l = N2O_h_satliq(T_d);
+        f64 h_d_v = N2O_h_satvap(T_d);
         f64 h_d = (1 - x_d) * h_d_l + x_d * h_d_v;
-        f64 rho_d_l = nox_rho_satliq(T_d);
-        f64 rho_d_v = nox_rho_satvap(T_d);
+        f64 rho_d_l = N2O_rho_satliq(T_d);
+        f64 rho_d_v = N2O_rho_satvap(T_d);
         // gotta do the quality ratios in specific-volume.
         f64 v_d_l = 1 / rho_d_l;
         f64 v_d_v = 1 / rho_d_v;
@@ -929,18 +1032,18 @@ local void step_state(broState* s) {
         //     / (Cv - bar * (u_l - u_v))
         // dandy.
 
-        f64 rho_l = nox_rho_satliq(T_t);
-        f64 rho_v = nox_rho_satvap(T_t);
-        f64 drhodT_l = (nox_rho_satliq(T_t + DT) - rho_l) / DT;
-        f64 drhodT_v = (nox_rho_satvap(T_t + DT) - rho_v) / DT;
+        f64 rho_l = N2O_rho_satliq(T_t);
+        f64 rho_v = N2O_rho_satvap(T_t);
+        f64 drhodT_l = (N2O_rho_satliq(T_t + DT) - rho_l) / DT;
+        f64 drhodT_v = (N2O_rho_satvap(T_t + DT) - rho_v) / DT;
 
-        f64 Cv_l = m_l * nox_cv_satliq(T_t);
-        f64 Cv_v = m_v * nox_cv_satvap(T_t);
+        f64 Cv_l = m_l * N2O_cv_satliq(T_t);
+        f64 Cv_v = m_v * N2O_cv_satvap(T_t);
         f64 Cv = Cv_l + Cv_v + s->C_w;
 
-        f64 h_l = nox_h_satliq(T_t);
-        f64 u_l = nox_u_satliq(T_t);
-        f64 u_v = nox_u_satvap(T_t);
+        f64 h_l = N2O_h_satliq(T_t);
+        f64 u_l = N2O_u_satliq(T_t);
+        f64 u_v = N2O_u_satvap(T_t);
 
         f64 foo = dm_inj / rho_l / (1/rho_v - 1/rho_l);
         f64 bar = (m_l * drhodT_l / (rho_l*rho_l)
@@ -964,23 +1067,23 @@ local void step_state(broState* s) {
 
         // Due to numerical inaccuracy, might technically have the properties
         // of a saturated mixture so just pretend its a saturated vapour.
-        f64 rhosat_v = nox_rho_satvap(T_t);
+        f64 rhosat_v = N2O_rho_satvap(T_t);
         if (rho_v >= rhosat_v)
             rho_v = rhosat_v;
 
 
         // Find injector flow rate.
 
-        f64 P_u = nox_P(T_t, rho_v);
+        f64 P_u = N2O_P(T_t, rho_v);
         f64 P_d = P_c;
 
         if (P_u <= CUTOFF_Pr * P_d)
             goto NO_INJECTOR_FLOW;
 
         // Technically gamma but use 'y' for file size reduction.
-        f64 y_u = nox_cp(T_t, P_u) / nox_cv(T_t, P_u);
+        f64 y_u = N2O_cp(T_t, P_u) / N2O_cv(T_t, P_u);
         // Use compressibility factor to account for non-ideal gas.
-        f64 Z_u = nox_Z(T_t, rho_v);
+        f64 Z_u = N2O_Z(T_t, rho_v);
 
         // Real compressible flow through an injector, with both
         // choked and unchoked possibilities:
@@ -993,7 +1096,7 @@ local void step_state(broState* s) {
             Pterm = br_pow(Pr_rec, 2 / y_u) - br_pow(Pr_rec, (y_u + 1) / y_u);
             Pterm *= 2 / (y_u - 1);
         }
-        dm_inj = s->Cd_inj*s->A_inj*P_u * br_sqrt(y_u/Z_u/NOX_R/T_t * Pterm);
+        dm_inj = s->Cd_inj*s->A_inj*P_u * br_sqrt(y_u/Z_u/N2O_R/T_t * Pterm);
 
         // Mass only leaves through injector, and no state change.
         dm_v = -dm_inj;
@@ -1019,10 +1122,10 @@ local void step_state(broState* s) {
         // => dT = dm_inj * (u - h) / Cv
         // which makes sense, since only energy change is due to lost flow work.
 
-        f64 u_u = nox_u(T_t, rho_v);
-        f64 h_u = nox_h(T_t, rho_v);
+        f64 u_u = N2O_u(T_t, rho_v);
+        f64 h_u = N2O_h(T_t, rho_v);
 
-        f64 Cv = s->C_w + m_v * nox_cv(T_t, P_u);
+        f64 Cv = s->C_w + m_v * N2O_cv(T_t, P_u);
 
         dT_t = dm_inj * (u_u - h_u) / Cv;
 
@@ -1057,7 +1160,7 @@ local void step_state(broState* s) {
     // No fuel.
     } else {
       #if !KEEP_SIMMING_AFTER_COMBUSTION
-        stop_sim();
+        return 1; // stop sim.
       #endif
 
         dD_f = 0.0;
@@ -1121,8 +1224,8 @@ local void step_state(broState* s) {
         // assuming isothermal mass transfer, so using tank temperature but with
         // current chamber pressure.
         T_n = T_t;
-        Mw_n = NOX_Mw;
-        cp_n = nox_cp(T_t, P_c);
+        Mw_n = N2O_Mw;
+        cp_n = N2O_cp(T_t, P_c);
 
     } else {
         // dm_n is 0 so any prop works.
@@ -1195,27 +1298,25 @@ local void step_state(broState* s) {
     s->T_g[s->upto]    = s->T_g[s->upto - 1]    + steps * Dt * dT_g;
     s->Cp_g[s->upto]   = s->Cp_g[s->upto - 1]   + steps * Dt * dCp_g;
     ++s->upto;
+    return 0;
 }
 
 
 
 // DLL-exposed function.
 void bro_sim(broState* s) {
+    // TODO: uh use them lmao.
+    (void)cea_Ivac;
+    (void)atmos_Pa;
+
     // Setup the assert macro to abort back to here, and just get outta here with
     // whatever data we gened.
     if (assertion_failed())
         return;
 
-    // Setup sim stop dropoff.
-    if (sim_stopped())
-        return;
-
-    // Do the initial step.
     if (s->count < 1) // onto nothing.
         return;
-    initial_state(s);
-
     // Integrate the system differential.
-    while (s->upto < s->count) // dont buffer overflow.
-        step_state(s);
+    initial_state(s);
+    while (!step_state(s));
 }

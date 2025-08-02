@@ -7,10 +7,10 @@ Requires:
 - numpy
 - matplotlib
 - scipy (if running 'bro.approximator')
-- coolprop
-- rocketcea
+- CoolProp
+- CEA_Wrap (if running 'bro.approximator')
 - setuptools
-- cython (+msvc unless u can find the option to use mingw)
+- Cython (+msvc unless u can find the option to use mingw)
 - mingw32 gcc
 
 To run:
