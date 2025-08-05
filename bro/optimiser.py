@@ -106,86 +106,48 @@ output variables are swept over a range and the optimal choice is kept.
 
         s.target_apogee = INPUT # [m]
 
+        s.ox_type = INPUT # must be "N2O"
+        s.fuel_type = INPUT # must be "PARAFFIN"
+
         s.locked_mass = INPUT # [kg]
         s.locked_length = INPUT # [m]
-        s.locked_local_com = INPUT # [m]
-        s.locked_com = ... # [m]
+        s.locked_com = INPUT # [m]
 
-        s.tank_inner_length = OUTPUT # [m]
-        s.tank_length = ... # [m]
-        s.tank_com = ... # [m]
+        s.rocket_diameter = INPUT # [m]
+
+        s.initial_altitude = INPUT # [m]
+
+        s.ambient_temperature = INPUT # [K]
+
+        s.tank_interior_length = OUTPUT # [m]
         s.tank_wall_density = INPUT # [kg/m^3]
         s.tank_wall_yield_strength = INPUT # [Pa]
         s.tank_wall_specific_heat_capacity = INPUT # [J/kg/K]
-        s.tank_wall_thickness = ... # [m]
-        s.tank_wall_mass = ... # [kg]
-        s.tank_temperature = ... # [K, over time]
-        s.tank_pressure = ... # [Pa, over time]
-
-        s.ox_type = INPUT # must be "N2O"
-        s.ox_volume_fill_frac = INPUT # [-]
-        s.ox_mass = ... # [kg, over time]
-        s.ox_mass_liquid = ... # [kg, over time]
-        s.ox_mass_vapour = ... # [kg, over time]
-        s.ox_com = ... # [m]
+        s.tank_wall_safety_factor = INPUT # [-]
+        s.tank_initial_volumetric_fill_fraction = INPUT # [-]
 
         s.mov_mass = INPUT # [kg]
         s.mov_length = INPUT # [m]
-        s.mov_local_com = INPUT # [m]
-        s.mov_com = ... # [m]
+        s.mov_com = INPUT # [m]
 
-        s.injector_discharge_coeff = INPUT # [-]
-        s.injector_orifice_area = OUTPUT # [m^2]
         s.injector_mass = INPUT # [kg]
         s.injector_length = INPUT # [m]
-        s.injector_local_com = INPUT # [m]
-        s.injector_com = ... # [m]
+        s.injector_com = INPUT # [m]
+        s.injector_discharge_coefficient = INPUT # [-]
+        s.injector_orifice_area = OUTPUT # [m^2]
 
-        s.cc_diameter = OUTPUT # [m]
-        s.cc_combustion_efficiency = INPUT # [-]
-        s.cc_temperature = ... # [K, over time]
-        s.cc_pressure = ... # [Pa, over time]
-        s.cc_pre_length = ... # [m]
-        s.cc_post_length = ... # [m]
-        s.cc_length = ... # [m]
-        s.cc_wall_density = INPUT # [kg/m^3]
-        s.cc_wall_yield_strength = INPUT # [Pa]
-        s.cc_wall_thickness = ... # [m]
-        s.cc_wall_mass = ... # [kg]
-        s.cc_wall_com = ... # [m]
+        s.combustion_chamber_diameter = OUTPUT # [m]
+        s.combustion_chamber_wall_density = INPUT # [kg/m^3]
+        s.combustion_chamber_wall_yield_strength = INPUT # [Pa]
+        s.combustion_chamber_wall_safety_factor = INPUT # [-]
 
-        s.fuel_type = INPUT # must be "PARAFFIN"
         s.fuel_length = OUTPUT # [m]
         s.fuel_initial_thickness = OUTPUT # [m]
-        s.fuel_mass = ... # [kg, over time]
-        s.fuel_com = ... # [m]
 
-        s.nozzle_discharge_coeff = INPUT # [-]
-        s.nozzle_thrust_efficiency = INPUT # [-]
-        s.nozzle_throat_area = OUTPUT # [m^2]
-        s.nozzle_exit_area = ... # [m^2]
-        s.nozzle_length = ... # [m]
-        s.nozzle_com = ... # [m]
-        s.nozzle_mass = ... # [kg]
+        s.nozzle_discharge_coefficient = INPUT # [-]
+        s.exit_area_to_throat_area_ratio = OUTPUT # [-]
+        s.throat_area = OUTPUT # [m^2]
 
-        s.rocket_diameter = INPUT # [m]
-        s.rocket_length = ... # [m]
-        s.rocket_mass = ... # [kg, over time]
-        s.rocket_com = ... # [m, over time]
-        s.rocket_drag_coeff = ... # [idk]
-        s.rocket_stability = INPUT # [-]
-        s.rocket_net_force = ... # [N, over time]
-        s.rocket_altitude = ... # [m, over time]
-
-        s.ambient_temperature = INPUT # [K]
-        s.ambient_pressure = INPUT # [Pa]
-        s.ambient_density = INPUT # [kg/m^3]
-        s.ambient_molar_mass = INPUT # [kg/mol]
-        s.ambient_constant_pressure_specific_heat_capacity = INPUT # [J/kg/K]
-        # shortest bro variable name.
-
-        s.thrust = ... # [N, over time]
-        s.burn_time = ... # [s]
 
     @classmethod
     def input_names(cls):
@@ -254,346 +216,6 @@ output variables are swept over a range and the optimal choice is kept.
         return "\n".join(lines)
 
 
-class Cylinder:
-    @classmethod
-    def solid(cls, length, diameter):
-        return cls(length, 0, diameter)
-
-    @classmethod
-    def pipe(cls, length, *, inner_diameter=None, outer_diameter=None):
-        return cls(length, inner_diameter, outer_diameter)
-
-    def __init__(self, length, inner_diameter, outer_diameter):
-        self.length = length
-        self.inner_diameter = inner_diameter
-        self.outer_diameter = outer_diameter
-
-    @property
-    def thickness(self):
-        if self.inner_diameter is None:
-            raise ValueError("unconstrained inner diameter")
-        if self.outer_diameter is None:
-            raise ValueError("unconstrained outer diameter")
-        thickness = (self.outer_diameter - self.inner_diameter) / 2
-        assert thickness >= 0
-        return thickness
-    @thickness.setter
-    def thickness(self, new_thickness, keep_inner=None):
-        if self.inner_diameter is None and self.outer_diameter is None:
-            raise ValueError("unconstrained diameters")
-        if keep_inner is None:
-            keep_inner = self.inner_diameter is not None
-        if keep_inner:
-            if self.inner_diameter is None:
-                raise ValueError("unconstrained inner diameter")
-            self.outer_diameter = self.inner_diameter + 2 * new_thickness
-        else:
-            if self.outer_diameter is None:
-                raise ValueError("unconstrained outer diameter")
-            self.inner_diameter = self.outer_diameter - 2 * new_thickness
-
-    def volume(self):
-        if self.inner_diameter is None:
-            raise ValueError("unconstrained inner diameter")
-        if self.outer_diameter is None:
-            raise ValueError("unconstrained outer diameter")
-        b = self.outer_diameter
-        a = self.inner_diameter
-        return self.length * pi/4 * (b**2 - a**2)
-
-    def surface_area(self, cutoff=None):
-        if self.inner_diameter is None:
-            raise ValueError("unconstrained inner diameter")
-        if self.outer_diameter is None:
-            raise ValueError("unconstrained outer diameter")
-        if cutoff is None:
-            cutoff = 1.0
-        if cutoff < 0:
-            cutoff = 0.0
-        if cutoff > 1.0:
-            cutoff = 1.0
-        inner = cutoff * self.length * pi * self.inner_diameter
-        outer = cutoff * self.length * pi * self.outer_diameter
-        end = pi/4 * (self.outer_diameter**2 - self.inner_diameter**2)
-        if cutoff == 0.0:
-            end = 0.0
-        if cutoff == 1.0:
-            end *= 2
-        return end + inner + outer
-
-    def mass(self, density):
-        return density * self.volume()
-
-    def com(self, top):
-        return top + self.length / 2
-
-    def set_thickness_for_stress(self, max_pressure, yield_strength, sf=2):
-        # Finding min thickness for hoop stress, using given safety factor and
-        # thin walled approximation:
-        #   thickness = max_pressure * inner_diameter / (2 * yield_strength)
-        # If inner diameter is unconstrained:
-        #   thickness = max_pressure * (outer_diameter - thickness) / (2 yield_strength)
-        #                     max_pressure * outer_diameter
-        #   => thickness = -----------------------------------
-        #                   max_pressure + 2 * yield_strength
-        if self.inner_diameter is None and self.outer_diameter is None:
-            raise ValueError("unconstrained diameters")
-        if self.inner_diameter is not None and self.outer_diameter is not None:
-            raise ValueError("overconstrained diameters")
-        two_ys = 2 * yield_strength
-        max_pressure *= sf
-        if self.inner_diameter is not None:
-            self.thickness = max_pressure * self.inner_diameter / two_ys
-        else:
-            self.thickness = max_pressure * self.outer_diameter / (max_pressure + two_ys)
-
-
-
-def simulate_burn(s):
-    """
-    Simulates the motor burn, with tank venting and combustion chamber
-    combusting. Requires the dependant system parameters:
-    - tank_wall_thickness
-    - tank_wall_mass
-    - cc_length
-    - nozzle_exit_area
-    """
-
-    # Coupla cylinders.
-    fuel_cyl = Cylinder.pipe(s.fuel_length, outer_diameter=s.cc_diameter)
-    fuel_cyl.thickness = s.fuel_initial_thickness
-    tank_inner_diameter = s.rocket_diameter - s.tank_wall_thickness
-    tank_cyl = Cylinder.solid(s.tank_inner_length, tank_inner_diameter)
-    cc_cyl = Cylinder.solid(s.cc_length, s.cc_diameter)
-
-    # Coupla buffers.
-    t       = np.empty(1_000_000, dtype=np.float64)
-    T_t     = np.empty(1_000_000, dtype=np.float64)
-    m_l     = np.empty(1_000_000, dtype=np.float64)
-    m_v     = np.empty(1_000_000, dtype=np.float64)
-    D_f     = np.empty(1_000_000, dtype=np.float64)
-    m_g     = np.empty(1_000_000, dtype=np.float64)
-    nmol_g  = np.empty(1_000_000, dtype=np.float64)
-    T_g     = np.empty(1_000_000, dtype=np.float64)
-    Cp_g    = np.empty(1_000_000, dtype=np.float64)
-
-    # Coupla parameters.
-    V_t = tank_cyl.volume()
-
-    C_w = s.tank_wall_mass*s.tank_wall_specific_heat_capacity
-
-    vff0_o = s.ox_volume_fill_frac
-
-    Cd_inj = s.injector_discharge_coeff
-    A_inj = s.injector_orifice_area
-
-    L_f = fuel_cyl.length
-    D0_f = fuel_cyl.inner_diameter
-
-    D_c = cc_cyl.outer_diameter
-    eta_c = s.cc_combustion_efficiency
-    Vempty_c = cc_cyl.volume()
-
-    Cd_nzl = s.nozzle_discharge_coeff
-    A_nzl = s.nozzle_throat_area
-    eps_nzl = s.nozzle_exit_area / s.nozzle_throat_area
-
-    T_a = s.ambient_temperature
-    P_a = s.ambient_pressure
-    rho_a = s.ambient_density
-    Mw_a = s.ambient_molar_mass
-    cp_a = s.ambient_constant_pressure_specific_heat_capacity
-
-    # Pack it up real nice for the sim.
-    state = bridge.State(
-        t=t,
-        T_t=T_t,
-        m_l=m_l,
-        m_v=m_v,
-        D_f=D_f,
-        m_g=m_g,
-        nmol_g=nmol_g,
-        T_g=T_g,
-        Cp_g=Cp_g,
-
-        V_t=V_t,
-
-        C_w=C_w,
-
-        vff0_o=vff0_o,
-
-        Cd_inj=Cd_inj,
-        A_inj=A_inj,
-
-        L_f=L_f,
-        D0_f=D0_f,
-
-        D_c=D_c,
-        eta_c=eta_c,
-        Vempty_c=Vempty_c,
-
-        Cd_nzl=Cd_nzl,
-        A_nzl=A_nzl,
-        eps_nzl=eps_nzl,
-
-        T_a=T_a,
-        P_a=P_a,
-        rho_a=rho_a,
-        Mw_a=Mw_a,
-        cp_a=cp_a,
-    )
-    # Send it.
-    _start = time.perf_counter()
-    count = state.sim()
-    _end = time.perf_counter()
-    print(f"Finished burn sim in {1e3*(_end - _start):.3f}ms")
-
-    # Trim unused memory.
-    t       = t[:count]
-    T_t     = T_t[:count]
-    m_l     = m_l[:count]
-    m_v     = m_v[:count]
-    D_f     = D_f[:count]
-    m_g     = m_g[:count]
-    nmol_g  = nmol_g[:count]
-    T_g     = T_g[:count]
-    Cp_g    = Cp_g[:count]
-
-
-    # Yoink some constants from the sim (hardcode skul lemoji).
-    GAS_CONSTANT = 8.31446261815324
-    Dt = 0.001
-    NEGLIGIBLE_MASS = 0.001
-
-
-    def Delta(x):
-        if len(x) == 1:
-            return np.array([0.0])
-        Dx = np.diff(x)
-        Dx = np.append(Dx, Dx[-1])
-        return Dx
-    def diff(x):
-        if len(x) == 1:
-            return np.array([0.0])
-        dx = np.diff(x) / np.diff(t)
-        dx = np.append(dx, dx[-1])
-        return dx
-
-
-    s.burn_time = t[-1]
-    mask = np.ones(len(t), dtype=bool)
-    # mask = (t <= 0.1)
-
-
-    # Reconstruct a bunch of dependant state.
-
-    V_f = L_f * pi / 4 * (D_c**2 - D_f**2)
-    V_c = Vempty_c - V_f
-
-    m_f = V_f * 924.5 # paraffin density :)
-
-    Dm_inj = -Delta(m_l + m_v)
-    Dm_reg = -Delta(m_f)
-    Dm_g = Delta(m_g)
-
-    dm_inj = -diff(m_l + m_v)
-    dm_reg = -diff(m_f)
-    dm_g = diff(m_g)
-
-    P_t = np.zeros(len(T_t), dtype=float)
-    # saturated pressure:
-    Pmask = (m_l > NEGLIGIBLE_MASS)
-    Psat = [PropsSI("P", "T", T, "Q", 0, "N2O") for T in T_t[Pmask]]
-    P_t[Pmask] = Psat
-    # not:
-    Pmask = ~Pmask & (m_v > NEGLIGIBLE_MASS)
-    Pnot = [PropsSI("P", "T", T, "D", m / V_t, "N2O") for T, m in zip(T_t[Pmask], m_v[Pmask])]
-    P_t[Pmask] = Pnot
-
-    ofr = np.zeros(len(T_t), dtype=float)
-    ofr_mask = (Dm_reg != 0)
-    ofr[ofr_mask] = Dm_inj[ofr_mask] / Dm_reg[ofr_mask]
-    ofr[~ofr_mask] = 0.0
-
-    R_g = GAS_CONSTANT/(m_g / nmol_g)
-
-    P_c = R_g * T_g * m_g / V_c
-
-
-    dm_out = dm_inj + dm_reg - dm_g
-
-    cp_g = Cp_g / m_g
-    y_g = cp_g / (cp_g - R_g)
-
-
-    s.ox_mass_liquid = m_l
-    s.ox_mass_vapour = m_v
-    s.ox_mass = m_l + m_v
-    s.fuel_mass = m_f
-    s.tank_temperature = T_t
-    s.tank_pressure = P_t
-    s.cc_pressure = P_c
-
-    plotme = [
-        # data, title, ylabel, y_lower_limit_as_zero
-        (s.tank_pressure, "Tank pressure", "Pressure [Pa]", False),
-        (s.cc_pressure, "CC pressure", "Pressure [Pa]", False),
-        (s.tank_temperature - 273.15, "Tank temperature", "Temperature [dC]", False),
-        (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
-        (dm_inj, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
-        (dm_reg, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
-        (s.ox_mass_liquid + s.ox_mass_vapour, "Tank mass", "Mass [kg]", True),
-        (s.fuel_mass, "Fuel mass", "Mass [kg]", True),
-        # (s.ox_mass_liquid, "Tank liquid mass", "Mass [kg]", True),
-        # (s.ox_mass_vapour, "Tank vapour mass", "Mass [kg]", True),
-        (m_g, "Gas mass", "ceebs", False),
-        (T_g, "Gas temp", "ceebs", False),
-        (nmol_g, "Gas number of moles", "ceebs", False),
-        (Cp_g / m_g, "Gas cp", "ceebs", False),
-        (dm_out, "Gas exit", "ceebs", False),
-        (y_g, "Gas gamma", "ceebs", False),
-    ]
-    def doplot(plotme):
-        plt.figure()
-        ynum = 2
-        xnum = (len(plotme) + 1) // 2
-        for i, elem in enumerate(plotme):
-            if elem is ...:
-                continue
-            y, title, ylabel, snapzero = elem
-            plt.subplot(ynum, xnum, 1 + i // ynum + xnum * (i % ynum))
-            if not isinstance(y, np.ndarray):
-                y = np.array(y)
-            if len(y) == 1:
-                if len(y) == len(t) - 1:
-                    plt.plot(t[:-1], y, "o")
-                else:
-                    plt.plot(t, y, "o")
-            elif len(y) > 0:
-                if len(y) == len(t) - 1:
-                    plt.plot(t[mask][:-1], y[mask[:-1]])
-                else:
-                    plt.plot(t[mask], y[mask])
-            plt.title(title)
-            plt.xlabel("Time [s]")
-            plt.ylabel(ylabel)
-            plt.grid()
-            if snapzero:
-                _, ymax = plt.ylim()
-                plt.ylim(0, ymax)
-        plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)
-    doplot(plotme)
-    plt.show()
-
-
-
-def simulate_trajectory(s):
-    """
-    havent don it yet
-    """
-    pass
-
-
 
 def cost(s):
     """
@@ -610,102 +232,179 @@ def cost(s):
             raise ValueError("expected all independants set, got unset: "
                     f"sys[{repr(name)}]")
 
-    # Fuel and ox types.
+    # sim.c only supports paraffin+N2O.
     assert s.ox_type == "N2O"
     assert s.fuel_type == "PARAFFIN"
 
+    # Coupla buffers.
+    t        = np.empty(10_000_000, dtype=np.float64)
+    alt_r    = np.empty(10_000_000, dtype=np.float64)
+    vel_r    = np.empty(10_000_000, dtype=np.float64)
+    acc_r    = np.empty(10_000_000, dtype=np.float64)
+    m_r      = np.empty(10_000_000, dtype=np.float64)
+    com_r    = np.empty(10_000_000, dtype=np.float64)
+    T_t      = np.empty(10_000_000, dtype=np.float64)
+    T_g      = np.empty(10_000_000, dtype=np.float64)
+    P_t      = np.empty(10_000_000, dtype=np.float64)
+    P_c      = np.empty(10_000_000, dtype=np.float64)
+    P_a      = np.empty(10_000_000, dtype=np.float64)
+    m_l      = np.empty(10_000_000, dtype=np.float64)
+    m_v      = np.empty(10_000_000, dtype=np.float64)
+    m_f      = np.empty(10_000_000, dtype=np.float64)
+    dm_inj   = np.empty(10_000_000, dtype=np.float64)
+    dm_reg   = np.empty(10_000_000, dtype=np.float64)
+    dm_out   = np.empty(10_000_000, dtype=np.float64)
+    m_g      = np.empty(10_000_000, dtype=np.float64)
+    cp_g     = np.empty(10_000_000, dtype=np.float64)
+    cv_g     = np.empty(10_000_000, dtype=np.float64)
+    y_g      = np.empty(10_000_000, dtype=np.float64)
+    ofr      = np.empty(10_000_000, dtype=np.float64)
+    Fthrust  = np.empty(10_000_000, dtype=np.float64)
+    Fdrag    = np.empty(10_000_000, dtype=np.float64)
+    Fgravity = np.empty(10_000_000, dtype=np.float64)
 
-    # Firstly get the easy masses/coms/length out of the way.
+    # Pack it up real nice for the sim.
+    state = bridge.State(
+        t=t,
+        alt_r=alt_r,
+        vel_r=vel_r,
+        acc_r=acc_r,
+        m_r=m_r,
+        com_r=com_r,
+        T_t=T_t,
+        T_g=T_g,
+        P_t=P_t,
+        P_c=P_c,
+        P_a=P_a,
+        m_l=m_l,
+        m_v=m_v,
+        m_f=m_f,
+        dm_inj=dm_inj,
+        dm_reg=dm_reg,
+        dm_out=dm_out,
+        m_g=m_g,
+        cp_g=cp_g,
+        cv_g=cv_g,
+        y_g=y_g,
+        ofr=ofr,
+        Fthrust=Fthrust,
+        Fdrag=Fdrag,
+        Fgravity=Fgravity,
 
-    top = -s.locked_length
-
-    s.locked_com = top + s.locked_local_com
-    top += s.locked_length
-
-
-    tank_max_pressure = 7.245e6 # [Pa], N2O critical pressure.
-    # Determine tank specs from the max pressure.
-    tank_wall_cyl = Cylinder.pipe(s.tank_inner_length, outer_diameter=s.rocket_diameter)
-    tank_wall_cyl.set_thickness_for_stress(tank_max_pressure,
-                                           s.tank_wall_yield_strength,
-                                           sf=3.5)
-    # TODO: establish exact tank mass, for now just assume thick ends.
-    tank_wall_end_cyl = Cylinder.solid(2 * tank_wall_cyl.thickness,
-                                       tank_wall_cyl.outer_diameter)
-
-    s.tank_length = s.tank_inner_length + 2 * tank_wall_end_cyl.length
-    s.tank_com = top + s.tank_length / 2
-    s.tank_wall_thickness = tank_wall_cyl.thickness
-    s.tank_wall_mass = tank_wall_cyl.mass(s.tank_wall_density) \
-                     + 2 * tank_wall_end_cyl.mass(s.tank_wall_density)
-    top += s.tank_length
-
-    s.mov_com = top + s.mov_local_com
-    top += s.mov_length
-
-    s.injector_com = top + s.injector_local_com
-    top += s.injector_length
-
-    # Using rule-of-thumb pre- and post-cc lengths:
-    s.cc_pre_length = s.cc_diameter
-    s.cc_post_length = 1.5 * s.cc_diameter
-    s.cc_length = s.cc_pre_length + s.fuel_length + s.cc_post_length
-
-    # TODO: nozzle specs
-    s.nozzle_exit_area = 20 * s.nozzle_throat_area
-    s.nozzle_length = 0.10
-    s.nozzle_com = top + 0.05
-    s.nozzle_mass = 2
-
-
-    # Burn me.
-    simulate_burn(s)
-
-
-    # Now do cc walls for cc max pressure.
-    cc_wall_cyl = Cylinder.pipe(s.cc_length, inner_diameter=s.cc_diameter)
-    cc_wall_cyl.set_thickness_for_stress(s.cc_pressure.max(),
-                                         s.cc_wall_yield_strength,
-                                         sf=3)
-    s.cc_wall_thickness = cc_wall_cyl.thickness
-    s.cc_wall_mass = cc_wall_cyl.mass(s.cc_wall_density)
-    s.cc_wall_com = cc_wall_cyl.com(top)
-
-    s.fuel_com = top + s.cc_pre_length + s.fuel_length / 2
-    top += s.cc_length
-
-
-    # All rocket components defined, cook me the full thing.
-    s.rocket_length = (
-        s.locked_length +
-        s.tank_length +
-        s.mov_length +
-        s.injector_length +
-        s.cc_length +
-        s.nozzle_length
+        target_apogee=s.target_apogee,
+        m_locked=s.locked_mass,
+        L_locked=s.locked_length,
+        com_locked=s.locked_com,
+        D_r=s.rocket_diameter,
+        alt0_r=s.initial_altitude,
+        T_a=s.ambient_temperature,
+        L_tw=s.tank_interior_length,
+        rho_tw=s.tank_wall_density,
+        Ys_tw=s.tank_wall_yield_strength,
+        c_tw=s.tank_wall_specific_heat_capacity,
+        sf_tw=s.tank_wall_safety_factor,
+        vff0_l=s.tank_initial_volumetric_fill_fraction,
+        m_mov=s.mov_mass,
+        L_mov=s.mov_length,
+        com_mov=s.mov_com,
+        m_inj=s.injector_mass,
+        L_inj=s.injector_length,
+        com_inj=s.injector_com,
+        Cd_inj=s.injector_discharge_coefficient,
+        A_inj=s.injector_orifice_area,
+        D_c=s.combustion_chamber_diameter,
+        rho_cw=s.combustion_chamber_wall_density,
+        Ys_cw=s.combustion_chamber_wall_yield_strength,
+        sf_cw=s.combustion_chamber_wall_safety_factor,
+        L_f=s.fuel_length,
+        th0_f=s.fuel_initial_thickness,
+        Cd_nzl=s.nozzle_discharge_coefficient,
+        eps=s.exit_area_to_throat_area_ratio,
+        A_throat=s.throat_area,
     )
-    s.rocket_mass = (
-        s.locked_mass +
-        s.tank_wall_mass +
-        s.ox_mass +
-        s.mov_mass +
-        s.injector_mass +
-        s.cc_wall_mass +
-        s.fuel_mass +
-        s.nozzle_mass
-    )
-    s.rocket_com = (
-        s.locked_com * s.locked_mass +
-        s.tank_com * (s.tank_wall_mass + s.ox_mass) +
-        s.mov_com * s.mov_mass +
-        s.injector_com * s.injector_mass +
-        s.cc_wall_com * s.cc_wall_mass +
-        s.fuel_com * s.fuel_mass +
-        s.nozzle_com * s.nozzle_mass
-    ) / s.rocket_mass
+    # Send it.
+    _start = time.perf_counter()
+    count = state.sim()
+    _end = time.perf_counter()
+    print(f"Finished burn sim in {1e3*(_end - _start):.3f}ms")
 
+    # Trim unused memory.
+    t        = t[:count]
+    alt_r    = alt_r[:count]
+    vel_r    = vel_r[:count]
+    acc_r    = acc_r[:count]
+    m_r      = m_r[:count]
+    com_r    = com_r[:count]
+    T_t      = T_t[:count]
+    T_g      = T_g[:count]
+    P_t      = P_t[:count]
+    P_c      = P_c[:count]
+    P_a      = P_a[:count]
+    m_l      = m_l[:count]
+    m_v      = m_v[:count]
+    m_f      = m_f[:count]
+    dm_inj   = dm_inj[:count]
+    dm_reg   = dm_reg[:count]
+    dm_out   = dm_out[:count]
+    m_g      = m_g[:count]
+    cp_g     = cp_g[:count]
+    cv_g     = cv_g[:count]
+    y_g      = y_g[:count]
+    ofr      = ofr[:count]
+    Fthrust  = Fthrust[:count]
+    Fdrag    = Fdrag[:count]
+    Fgravity = Fgravity[:count]
 
-    # Launch me.
-    simulate_trajectory(s)
-
-    print(s)
+    plotme1 = [
+        # data, title, ylabel, y_lower_limit_as_zero
+        (alt_r*1e-3, "Altitude", "Altitude [km]", False),
+        (vel_r, "Velocity", "Speed [m/s]", False),
+        (Fthrust, "Thrust", "Force [N]", False),
+        (Fdrag, "Drag", "Force [N]", False),
+        (P_t, "Tank pressure", "Pressure [Pa]", False),
+        (P_c, "CC pressure", "Pressure [Pa]", False),
+        (T_t - 273.15, "Tank temperature", "Temperature [dC]", False),
+        (T_g - 273.15, "CC temperature", "Temperature [dC]", False),
+        (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
+        (dm_out, "Exhaust mass flow rate", "Mass flow rate [kg/s]", True),
+        (dm_inj, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
+        (dm_reg, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
+        (m_l + m_v, "Tank mass", "Mass [kg]", True),
+        (m_f, "Fuel mass", "Mass [kg]", True),
+    ]
+    plotme2 = [
+        # data, title, ylabel, y_lower_limit_as_zero
+        (acc_r, "Rocket acceleration", "Acceleration [m/s^2]", False),
+        (m_r, "Rocket mass", "Mass [kg]", False),
+        (P_a, "Atmospheric pressure", "Pressure [Pa]", False),
+        (Fgravity, "Gravity", "Force [N]", False),
+        (m_l, "Tank liquid mass", "Mass [kg]", False),
+        (m_v, "Tank vapour mass", "Mass [kg]", True),
+        (m_g, "CC gas mass", "Mass [kg]", False),
+        (cp_g, "CC gas cp", "Specific heat capacity [J/kg/K]", False),
+        (cv_g, "CC gas cv", "Specific heat capacity [J/kg/K]", False),
+        (y_g, "CC gas gamma", "Ratio [-]", True),
+    ]
+    def doplot(plotme):
+        if not plotme:
+            return
+        plt.figure()
+        ynum = 2
+        xnum = (len(plotme) + 1) // 2
+        for i, elem in enumerate(plotme):
+            if elem is ...:
+                continue
+            y, title, ylabel, snapzero = elem
+            plt.subplot(ynum, xnum, 1 + i // ynum + xnum * (i % ynum))
+            plt.plot(t[:len(y)], y, "-" + "o"*(len(y) == 1))
+            plt.title(title)
+            plt.xlabel("Time [s]")
+            plt.ylabel(ylabel)
+            plt.grid()
+            if snapzero:
+                _, ymax = plt.ylim()
+                plt.ylim(0, ymax)
+        plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)
+    doplot(plotme1)
+    doplot(plotme2)
+    plt.show()

@@ -381,9 +381,9 @@ class RationalPolynomial:
                 (approx, "Approximation"),
                 (error, "error"),
             ]
-        fig = plt.figure(figsize=(6 * len(plotme), 6))
+        fig = plt.figure(figsize=(8, 5))
         for i, (data, title) in enumerate(plotme):
-            ax = fig.add_subplot(1, len(plotme), 1 + i, projection="3d" if threed else None)
+            ax = fig.add_subplot(len(plotme), 1, 1 + i, projection="3d" if threed else None)
             conts = []
             if self.dims == 2:
                 def plotter(z, colour="viridis"):
@@ -402,11 +402,8 @@ class RationalPolynomial:
             else:
                 plotter(data)
             ax.set_title(title)
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
             if self.dims == 2:
                 if threed:
-                    ax.set_zlabel("Z")
                     ax.view_init(elev=30, azim=135)
                 else:
                     for cont in conts:
@@ -527,7 +524,7 @@ class RationalPolynomial:
                 if sum(exps) != sumdeg:
                     continue
                 i += 1
-                if i not in allidxs:
+                if sumdeg > 1 and i not in allidxs:
                     continue
                 exps += (0, ) * (3 - len(exps))
                 parts = []
@@ -664,7 +661,7 @@ def do(func, X, Y=None, maskf=None, plotme=True, **of_kwargs):
         # can easily check that 1d has no poles over input range.
         xmin, xmax = bounds[0]
         roots = np.roots(ratpoly.q.as_numpy())
-        if ((xmin <= roots) & (roots <= xmax)).any():
+        if ((roots.imag == 0.0) & (xmin <= roots) & (roots <= xmax)).any():
             raise ValueError(f"poly wanna pole: {ratpoly.__repr__(False)}")
     if plotme:
         N = 600 if Y is None else 100
@@ -728,7 +725,7 @@ def compare2d(X, Y, realf, approxf, trim_corners=False):
 
 
 
-# NOTE: to avoid overflow, all pressure calcs are done in MPa.
+# NOTE: to avoid overflow, pretty much all approximations taken inputs in MPa.
 
 def nox():
     from CoolProp.CoolProp import PropsSI
@@ -936,7 +933,7 @@ class CEA_Result:
                   # isentropic ratio of specific heats (name from cea_wrap)
         "t_gammas", # Throat gammas
         "c_gammas", # Chamber gammas
-        "gamma", # Real ratio of specific heats
+        "gamma", # Ratio of specific heats
         "t_gamma", # Throat gamma
         "c_gamma", # Chamber gamma
         "isp", # Ideal ISP (ambient pressure = exit pressure), s
@@ -1016,6 +1013,7 @@ class CEA:
             self.problem.set_ae_at(eps)
             cea = self.problem.run()
             self.cache[key] = CEA_Result.from_cea(cea)
+            self.changed = True
         return self.cache[key]
 
     def __getitem__(self, name):
@@ -1033,7 +1031,11 @@ class CEA:
                 values = data["values"]
                 cache = {self.keyof(*k): CEA_Result(v) for k, v in zip(keys, values)}
                 self.cache = cache | self.cache
+        self.changed = False
     def save(self):
+        if not self.changed:
+            print("cea cache unchanged.")
+            return
         with FileLock(self.LOCK_PATH):
             print("saving cea cache...")
             self.load(lock=False)
@@ -1088,6 +1090,28 @@ CEA = CEA()
 
 
 def cea():
+
+    def map_Peps(f, ofr=6, vectorise=None):
+        vf = lambda P, eps: f(P, ofr, eps)
+        if (vectorise is None and not isinstance(f, np.vectorize)) or vectorise:
+            vf = np.vectorize(vf)
+        vf.__name__ = f.__name__ + f"  | x=P, y=eps, ofr={ofr}"
+        return vf
+    def map_Pofr(f, eps=3, vectorise=None):
+        vf = lambda P, ofr: f(P, ofr, eps)
+        if (vectorise is None and not isinstance(f, np.vectorize)) or vectorise:
+            vf = np.vectorize(vf)
+        vf.__name__ = f.__name__ + f"  | x=P, y=ofr, eps={eps}"
+        return vf
+    def map_ofreps(f, P=2, vectorise=None):
+        vf = lambda ofr, eps: f(P, ofr, eps)
+        if (vectorise is None and not isinstance(f, np.vectorize)) or vectorise:
+            vf = np.vectorize(vf)
+        vf.__name__ = f.__name__ + f"  | x=ofr, y=eps, P={P}"
+        return vf
+
+
+
 
     # cc temperature is independant of epsilon. Also its a huge pain to approx,
     # so we split into a high-ofr approx and a low-ofr approx which combine to
@@ -1157,76 +1181,86 @@ def cea():
 
 
     # cc Mw indep of eps.
-    def cea_Mw(P, ofr):
+    def cea_Mw_cc(P, ofr):
         return CEA["c_mw"](P, ofr, 2)
-    # peek(cea_Mw, *CEA.in_Pofr())
-    # do(cea_Mw, *CEA.in_Pofr(N=40), blitz=1.0)
-    do(cea_Mw, *CEA.in_Pofr(N=70), spec=[(0, 1, 3, 4, 5), (1, 2, 3, 5)])
+    # peek2d(cea_Mw_cc, *CEA.in_Pofr())
+    # do(cea_Mw_cc, *CEA.in_Pofr(N=40))
+    do(cea_Mw_cc, *CEA.in_Pofr(), spec=[(0, 1, 3, 4, 5), (1, 2, 3, 5)])
+
+
+    # throat gamma indep of eps. also theres a huge fuckign line at ofr=3.07 so
+    # splitting there just makes sense.
+    def cea_y_throat_in_high(N=50):
+        X = 2 + CEA.in_P(N=N, conc=CEA.P_low, strength=2.0)
+        Y = concspace(3.07, 3.07, CEA.ofr_high, strength=0.0, N=(2*N)//3)
+        def mask(X, Y, training=False):
+            return np.ones(X.shape, dtype=bool)
+        return *np.meshgrid(X, Y), mask
+    def cea_y_throat_in_low(N=50):
+        X = 2 + CEA.in_P(N=N, conc=CEA.P_low, strength=2.0)
+        Y = concspace(CEA.ofr_low, 3.07, 3.07, strength=2.0, N=N//3)
+        def mask(X, Y, training=False):
+            return np.ones(X.shape, dtype=bool)
+        return *np.meshgrid(X, Y), mask
+    def cea_y_throat_high(P, ofr):
+        return CEA["t_gamma"](P - 2, ofr, 2)
+    def cea_y_throat_low(P, ofr):
+        return CEA["t_gamma"](P - 2, ofr, 2)
+    # peek2d(cea_y_throat_high, *cea_y_throat_in_high())
+    # peek2d(cea_y_throat_low, *cea_y_throat_in_low())
+
+    # do(cea_y_throat_high, *cea_y_throat_in_high(), blitz=7.0, starting_cost=28)
+    do(cea_y_throat_high, *cea_y_throat_in_high(), spec=[(0, 1, 2, 4, 5), (1, 2, 4, 5, 8)])
+
+    # do(cea_y_throat_low, *cea_y_throat_in_low(), blitz=7.0, starting_cost=29)
+    do(cea_y_throat_low, *cea_y_throat_in_low(), spec=[(0, 1, 2, 3, 4, 5), (3, 4, 5, 6, 7, 12)])
 
 
 
-
-
-    def map_Peps(f, ofr=6, vectorise=None):
-        vf = lambda P, eps: f(P, ofr, eps)
-        if vectorise is True or vectorise is None and isinstance(f, np.vectorize):
-            vf = np.vectorize(vf)
-        vf.__name__ = f.__name__ + f"  | x=P, y=eps, ofr={ofr}"
-        return vf
-    def map_Pofr(f, eps=3, vectorise=None):
-        vf = lambda P, ofr: f(P, ofr, eps)
-        if vectorise is True or vectorise is None and isinstance(f, np.vectorize):
-            vf = np.vectorize(vf)
-        vf.__name__ = f.__name__ + f"  | x=P, y=ofr, eps={eps}"
-        return vf
-    def map_ofreps(f, P=2, vectorise=None):
-        vf = lambda ofr, eps: f(P, ofr, eps)
-        if vectorise is True or vectorise is None and isinstance(f, np.vectorize):
-            vf = np.vectorize(vf)
-        vf.__name__ = f.__name__ + f"  | x=ofr, y=eps, P={P}"
-        return vf
-
-
-
-    # "random" values for testing.
-    mdot = 0.4
-    A_throat = 0.025**2 * np.pi / 4
-    P_a = 1e5
-    # P_a = 0.0
-    g0 = 9.80665
-
-    def thurst_ideal(P, ofr, eps):
-        cea = CEA(P, ofr, eps)
-        return mdot * cea.cstar * cea.cf
-    def thurst_no_vel_change(P, ofr, eps):
-        cea = CEA(P, ofr, eps)
-        Ve = cea.isp * g0
-        # Also works:
-        # Ve = cea.mach * cea.son
-        # Ve = np.sqrt(2 * (cea.c_h - cea.h))
-        return mdot * Ve + (cea.p - P_a) * A_throat*eps
-    def thurst_isp_vaccuum(P, ofr, eps):
-        cea = CEA(P, ofr, eps)
-        Ve_vac = cea.ivac * g0
-        return mdot * Ve_vac - P_a * A_throat*eps
-    def thurst_rocketcea_formula(P, ofr, eps):
-        cea = CEA(P, ofr, eps)
-        cf = cea.isp * g0 / cea.cstar - eps * P_a / (P*1e6)
-        return mdot * cea.cstar * cf
-
-
+    # Branch to test thrust formulas.
     if 0:
+        # "random" values for testing.
+        mdot = 0.4
+        A_throat = 0.025**2 * np.pi / 4
+        P_a = 1e5
+        # P_a = 0.0
+        g0 = 9.80665
+
+        def thurst_ideal(P, ofr, eps):
+            cstar = CEA["cstar"](P, ofr, eps)
+            cf = CEA["cf"](P, ofr, eps)
+            return mdot * cstar * cf
+        def thurst_no_vel_change(P, ofr, eps):
+            isp = CEA["isp"](P, ofr, eps)
+            P_e = CEA["p"](P, ofr, eps)
+            V_e = isp * g0
+            # Also works:
+            # V_e = cea.mach * cea.son
+            # V_e = np.sqrt(2 * (cea.c_h - cea.h))
+            return mdot * V_e + (P_e - P_a) * A_throat*eps
+        def thurst_isp_vaccuum(P, ofr, eps):
+            ivac = CEA["ivac"](P, ofr, eps)
+            V_e = ivac * g0
+            return mdot * V_e - P_a * A_throat*eps
+        def thurst_rocketcea_formula(P, ofr, eps):
+            isp = CEA["isp"](P, ofr, eps)
+            cstar = CEA["cstar"](P, ofr, eps)
+            return mdot * isp * g0 - mdot * ctar * eps * P_a/(P*1e6)
+            cf = isp * g0 / cstar - eps * P_a / (P*1e6)
+            return mdot * cstar * cf
+
         for name, func in locals().items():
             if not name.startswith("thurst"):
                 continue
             peek3d(
-                [map_Peps(func), *CEA.in_Peps()],
-                [map_Pofr(func), *CEA.in_Pofr()],
-                [map_ofreps(func), *CEA.in_ofreps()],
+                [map_Peps(func, vectorise=False), *CEA.in_Peps()],
+                [map_Pofr(func, vectorise=False), *CEA.in_Pofr()],
+                [map_ofreps(func, vectorise=False), *CEA.in_ofreps()],
             )
         return
 
 
+    # Branch to approximate Ivac (using biased lut).
     if 1:
         class Bias:
             # Biases a linearly-spaced interval to be not that, so that a transformation can
@@ -1411,7 +1445,6 @@ def cea():
                 [error_ofreps, *CEA.in_ofreps(N=50)],
             )
 
-
             for ofr in CEA.in_ofr(N=50):
                 if ofr < 2.0 or ofr > 9.5:
                     continue
@@ -1419,56 +1452,98 @@ def cea():
                 peek3d(
                     [map_Peps(CEA["ivac"], ofr=ofr), *CEA.in_Peps(N=50)],
                     [map_Peps(unbiased_lut, ofr=ofr, vectorise=False), *CEA.in_Peps(N=50)],
-                    [lambda P, eps: error_Peps(P, eps, ofr), *CEA.in_Peps(N=50)],
+                    [map_Peps(error_Peps, ofr=ofr), *CEA.in_Peps(N=50)],
                 )
 
 
-def atmos():
-    def atmos_get_Pa(altitude):
-        g0 = 9.80665  # m/s2
-        R = 8.3144598 # J/mol/K
-        M = 0.0289644 # kg/mol
+def amb():
+    g0 = 9.80665  # [m/s^2]
+    R = 8.31446261815324 / 28.9647e-3 # [J/kg/K]
 
-        # Define layers: base altitude (m), base temp (K), base pressure (Pa), lapse rate (K/m)
-        layers = [
-            (0,       288.15, 101325.0,    -0.0065),   # Troposphere
-            (11000,   216.65, 22632.1,      0.0),      # Tropopause
-            (20000,   216.65, 5474.89,      0.001),    # Lower Stratosphere
-            (32000,   228.65, 868.02,       0.0028),
-            (47000,   270.65, 110.91,       0.0),
-            (51000,   270.65, 66.94,       -0.0028),
-            (71000,   214.65, 3.96,        -0.002),    # Mesosphere
-            (84852,   186.87, 0.3734,       0.0)       # Upper Mesosphere
-        ]
+    # International standard atmospheric model.
+    layers = [
+        # base altitude, base temperature, base pressure, lapse rate
+        (0,     288.15,  101325.0, +0.0065),
+        (11019, 216.65,  22632.1,  0),
+        (20063, 216.65,  5474.89,  -0.001),
+        (32162, 228.65,  868.02,   -0.0028),
+        (47350, 270.65,  110.91,   0),
+        (51412, 270.65,  66.94,    +0.0028),
+        (71802, 214.65,  3.96,     +0.002),
+        (86000, 186.946, 0.3734,   0),
+    ]
 
+    @np.vectorize
+    def amb_T_P(alt):
         for i in range(len(layers) - 1):
-            h_base, T_base, P_base, L = layers[i]
-            h_next = layers[i + 1][0]
-            if altitude < h_next:
-                h = altitude
+            alt_base, T_base, P_base, lapse_rate = layers[i]
+            alt_next = layers[i + 1][0]
+            if alt < alt_next:
                 break
         else:
-            # If above last defined layer, extrapolate with last known values
-            h_base, T_base, P_base, L = layers[-1]
-            h = altitude
+            alt_base, T_base, P_base, lapse_rate = layers[-1]
 
-        if L == 0:
-            # Isothermal layer
-            pressure = P_base * math.exp(-g0 * M * (h - h_base) / (R * T_base))
+        if lapse_rate == 0:
+            # Isothermal layer.
+            T = T_base
+            P = P_base * np.exp(-g0 * (alt - alt_base) / (R * T_base))
         else:
-            # Gradient layer
-            T = T_base + L * (h - h_base)
-            pressure = P_base * (T / T_base) ** (-g0 * M / (R * L))
+            # Gradient layer.
+            T = T_base - lapse_rate * (alt - alt_base)
+            P = P_base * (T / T_base) ** (g0 / (R * lapse_rate))
+        return T, P
 
-        return pressure
+    ALT_OFF = 10_000 # avoid too close to 0.
+    ALT_HIGH = 20_063
+    ALT_HIGHEST = 60_000 # 21.5 Pa and 0.303e-3 kg/m^3 aka nothing so.
+    def alt_in(N=200):
+        return concspace(ALT_OFF, ALT_OFF, ALT_OFF + ALT_HIGHEST, N=N, strength=8.0)
+    def alt_in_low(N=100):
+        return concspace(ALT_OFF, ALT_OFF, ALT_OFF + ALT_HIGH, N=N, strength=5.0)
+    def alt_in_high(N=100):
+        return concspace(ALT_HIGH, ALT_HIGH, ALT_HIGHEST - ALT_HIGH, N=N, strength=5.0)
 
-    altitude_off = 10_000
-    altitude = concspace(altitude_off, altitude_off, altitude_off + 30_000, N=100, strength=5.0)
-    def atmos_Pa(x):
-        return np.vectorize(atmos_get_Pa)(x - altitude_off)
-    # peek1d(Pa, altitude)
-    # do(atmos_Pa, altitude)
-    do(atmos_Pa, altitude, spec=[(0, 1, 2), (0, 1, 2)])
+
+    def amb_P_low(alt):
+        _, P = amb_T_P(alt - ALT_OFF)
+        return P
+    def amb_P_high(alt):
+        _, P = amb_T_P(alt)
+        return P
+    # peek1d(amb_P_low, alt_in_low())
+    # peek1d(amb_P_high, alt_in_high())
+
+    # do(amb_P_low, alt_in_low())
+    do(amb_P_low, alt_in_low(), spec=[(0, 1, 2), (0, 2)])
+
+    # do(amb_P_high, alt_in_high())
+    do(amb_P_high, alt_in_high(), spec=[(0, 1, 2), (0, 1, 2)])
+
+
+    def amb_rho_low(alt):
+        T, P = amb_T_P(alt - ALT_OFF)
+        return P / R / T
+    def amb_rho_high(alt):
+        T, P = amb_T_P(alt)
+        return P / R / T
+    # peek1d(amb_rho_low, alt_in_low())
+    # peek1d(amb_rho_high, alt_in_high())
+
+    # do(amb_rho_low, alt_in_low())
+    do(amb_rho_low, alt_in_low(), spec=[(0, 1, 2), (0, 1, 2)])
+
+    # do(amb_rho_high, alt_in_high())
+    do(amb_rho_high, alt_in_high(), spec=[(0, 1, 2), (0, 2)])
+
+
+    def amb_a(alt):
+        T, _ = amb_T_P(alt - ALT_OFF)
+        return np.sqrt(1.4 * R * T)
+    # peek1d(amb_a, alt_in())
+
+    # do(amb_a, alt_in(), blitz=6.0, starting_cost=20)
+    do(amb_a, alt_in(), spec=[(1, 3), (0, 1, 2, 3, 4)])
+
 
 
 
@@ -1479,7 +1554,7 @@ def main():
     with CEA:
         cea()
 
-    atmos()
+    amb()
 
     plt.show()
 
@@ -1753,7 +1828,6 @@ nox_Z -> (4.1802e+05 - 4210 y + 9.9798 xy + y^2) / (4.196e+05)
     f64 c4 = +2.3783799563418678e-05;
     f64 c5 = +2.383200854104837e-06;
     return c0 + c2*y1 + c4*x1y1 + c5*y2;
-
 cea_T_cc_high: {'spec': [(0, 1, 2, 4, 5), (1, 4, 5, 7, 8)]}
 (0, 1, 2, 4, 5) / (1, 4, 5, 7, 8) ..................... 2.698%
 cea_T_cc_high -> (-14.288 - 32.429 x + 3.4748 y + 18.316 xy + y^2) / (0.0082956 x + 0.0013866 xy + 0.00041964 y^2 - 4.2175e-06 x^2 y + 0.00023248 xy^2)
@@ -1866,9 +1940,9 @@ cea_cp_cc_low_right -> (4.2606 + 0.28647 x - 3.3469 y + y^2) / (0.00059783 + 7.1
     f64 Den = d0 + d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d8*x1y2;
     return Num / Den;
 
-cea_Mw: {'spec': [(0, 1, 3, 4, 5), (1, 2, 3, 5)]}
+cea_Mw_cc: {'spec': [(0, 1, 3, 4, 5), (1, 2, 3, 5)]}
 (0, 1, 3, 4, 5) / (1, 2, 3, 5) ........................ 3.286%
-cea_Mw -> (0.21183 + 0.73935 x + 0.0044777 x^2 + 0.13399 xy + y^2) / (60.847 x + 68.522 y + 0.086728 x^2 + 30.139 y^2)
+cea_Mw_cc -> (0.21183 + 0.73935 x + 0.0044777 x^2 + 0.13399 xy + y^2) / (60.847 x + 68.522 y + 0.086728 x^2 + 30.139 y^2)
     f64 x1 = ;
     f64 y1 = ;
     f64 x2 = ;
@@ -1884,6 +1958,53 @@ cea_Mw -> (0.21183 + 0.73935 x + 0.0044777 x^2 + 0.13399 xy + y^2) / (60.847 x +
     f64 d5 = +30.13870865656756;
     f64 Num = n0 + n1*x1 + n3*x2 + n4*x1y1 + y2;
     f64 Den = d1*x1 + d2*y1 + d3*x2 + d5*y2;
+    return Num / Den;
+
+cea_y_throat_high: {'spec': [(0, 1, 2, 4, 5), (1, 2, 4, 5, 8)]}
+(0, 1, 2, 4, 5) / (1, 2, 4, 5, 8) ..................... 3.988%
+cea_y_throat_high -> (-2.9309 + 10.898 x - 6.0468 y - 0.87067 xy + y^2) / (7.6854 x - 5.729 y - 0.40592 xy + 0.89128 y^2 - 0.017712 xy^2)
+    f64 x1 = ;
+    f64 y1 = ;
+    f64 x1y1 = ;
+    f64 y2 = ;
+    f64 x1y2 = ;
+    f64 n0 = -2.9309092389810942;
+    f64 n1 = +10.897607957141895;
+    f64 n2 = -6.046792817383578;
+    f64 n4 = -0.8706749287437507;
+    f64 d1 = +7.685381299036463;
+    f64 d2 = -5.7290230856550375;
+    f64 d4 = -0.40591530228463435;
+    f64 d5 = +0.8912798496664587;
+    f64 d8 = -0.017711953717497203;
+    f64 Num = n0 + n1*x1 + n2*y1 + n4*x1y1 + y2;
+    f64 Den = d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d8*x1y2;
+    return Num / Den;
+
+cea_y_throat_low: {'spec': [(0, 1, 2, 3, 4, 5), (3, 4, 5, 6, 7, 12)]}
+(0, 1, 2, 3, 4, 5) / (3, 4, 5, 6, 7, 12) .............. 6.397%
+cea_y_throat_low -> (-0.11263 + 0.10385 x + 0.029205 y + 0.60363 x^2 - 1.4356 xy + y^2) / (0.49961 x^2 - 1.07 xy + 0.76208 y^2 + 0.00039374 x^3 - 0.0194 x^2 y + 0.0019977 x^2 y^2)
+    f64 x1 = ;
+    f64 y1 = ;
+    f64 x2 = ;
+    f64 x1y1 = ;
+    f64 y2 = ;
+    f64 x3 = ;
+    f64 x2y1 = ;
+    f64 x2y2 = ;
+    f64 n0 = -0.11263466290978147;
+    f64 n1 = +0.10384675996676593;
+    f64 n2 = +0.02920480705193921;
+    f64 n3 = +0.6036341368237339;
+    f64 n4 = -1.4356038387210333;
+    f64 d3 = +0.4996068573643659;
+    f64 d4 = -1.069986102678251;
+    f64 d5 = +0.7620770586156876;
+    f64 d6 = +0.00039374249322294956;
+    f64 d7 = -0.019399944085301078;
+    f64 d12 = +0.0019976937469849713;
+    f64 Num = n0 + n1*x1 + n2*y1 + n3*x2 + n4*x1y1 + y2;
+    f64 Den = d3*x2 + d4*x1y1 + d5*y2 + d6*x3 + d7*x2y1 + d12*x2y2;
     return Num / Den;
 
 Ivac using LUT
@@ -1917,18 +2038,75 @@ data:
   [203.761474609375   275.45361328125   ]
   [200.18348693847656 268.7767639160156 ]]]
 
-atmos_Pa: {'spec': [(0, 1, 2), (0, 1, 2)]}
-(0, 1, 2) / (0, 1, 2) ................................. 1.459%
-atmos_Pa -> (4.1634e+09 - 1.2755e+05 x + x^2) / (53824 - 3.397 x + 6.7098e-05 x^2)
+amb_P_low: {'spec': [(0, 1, 2), (0, 2)]}
+(0, 1, 2) / (0, 2) .................................... 0.2696%
+amb_P_low -> (1.3269e+09 - 70527 x + x^2) / (5522.8 + 1.6122e-05 x^2)
     f64 x1 = ;
     f64 x2 = ;
-    f64 n0 = +4163420288.511369;
-    f64 n1 = -127550.45177127342;
-    f64 d0 = +53823.7243981808;
-    f64 d1 = -3.3969727188689047;
-    f64 d2 = +6.709829651497073e-05;
+    f64 n0 = +1326889135.6347075;
+    f64 n1 = -70527.4205624988;
+    f64 d0 = +5522.836249663364;
+    f64 d2 = +1.6121842727811546e-05;
+    f64 Num = n0 + n1*x1 + x2;
+    f64 Den = d0 + d2*x2;
+    return Num / Den;
+
+amb_P_high: {'spec': [(0, 1, 2), (0, 1, 2)]}
+(0, 1, 2) / (0, 1, 2) ................................. 0.4475%
+amb_P_high -> (2.8395e+09 - 1.0314e+05 x + x^2) / (2.3917e+05 - 24.243 x + 0.0011468 x^2)
+    f64 x1 = ;
+    f64 x2 = ;
+    f64 n0 = +2839481483.3687034;
+    f64 n1 = -103143.5518901285;
+    f64 d0 = +239165.4892657625;
+    f64 d1 = -24.24291511989479;
+    f64 d2 = +0.00114675186987331;
     f64 Num = n0 + n1*x1 + x2;
     f64 Den = d0 + d1*x1 + d2*x2;
+    return Num / Den;
+
+amb_rho_low: {'spec': [(0, 1, 2), (0, 1, 2)]}
+(0, 1, 2) / (0, 1, 2) ................................. 1.288%
+amb_rho_low -> (1.0803e+09 - 64848 x + x^2) / (3.4519e+08 + 12654 x - 0.3741 x^2)
+    f64 x1 = ;
+    f64 x2 = ;
+    f64 n0 = +1080314808.6263719;
+    f64 n1 = -64847.90278878072;
+    f64 d0 = +345190107.69729966;
+    f64 d1 = +12653.90131058989;
+    f64 d2 = -0.37409509100171673;
+    f64 Num = n0 + n1*x1 + x2;
+    f64 Den = d0 + d1*x1 + d2*x2;
+    return Num / Den;
+
+amb_rho_high: {'spec': [(0, 1, 2), (0, 2)]}
+(0, 1, 2) / (0, 2) .................................... 0.6077%
+amb_rho_high -> (2.2395e+09 - 92442 x + x^2) / (-6.5681e+07 + 22.324 x^2)
+    f64 x1 = ;
+    f64 x2 = ;
+    f64 n0 = +2239506917.973228;
+    f64 n1 = -92441.9508707563;
+    f64 d0 = -65681468.84943648;
+    f64 d2 = +22.324464921748664;
+    f64 Num = n0 + n1*x1 + x2;
+    f64 Den = d0 + d2*x2;
+    return Num / Den;
+
+amb_a: {'spec': [(1, 3), (0, 1, 2, 3, 4)]}
+(1, 3) / (0, 1, 2, 3, 4) .............................. 6.317%
+amb_a -> (2.4539e+09 x + x^3) / (2.7962e+10 - 46763 x + 565.8 x^2 - 0.0098884 x^3 + 9.1805e-08 x^4)
+    f64 x1 = ;
+    f64 x2 = ;
+    f64 x3 = ;
+    f64 x4 = ;
+    f64 n1 = +2453911045.412046;
+    f64 d0 = +27961612000.005264;
+    f64 d1 = -46762.970478368705;
+    f64 d2 = +565.8014318466305;
+    f64 d3 = -0.00988835027584721;
+    f64 d4 = +9.180518407728973e-08;
+    f64 Num = n1*x1 + x3;
+    f64 Den = d0 + d1*x1 + d2*x2 + d3*x3 + d4*x4;
     return Num / Den;
 
     """

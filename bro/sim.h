@@ -4,82 +4,208 @@
 
 // For discussing maths, cop a legend (shoutout charle):
 //
-// X0 = initial
-// dX = time derivative
-// DX = discrete change
+// X0 = initial value.
+// dX = time derivative.
+// DX = discrete change.
 //
-// X_l = ox liquid
-// X_v = ox vapour
-// X_o = ox anywhere
-// X_f = fuel
-// X_g = cc gases
-// X_n = new cc gases
+// X_r = rocket property.
+// X_a = ambient property.
+// X_t = tank property.
+// X_tw = tank wall property.
+// X_mov = main oxidiser valve property.
+// X_inj = injector property.
+// X_c = combustion chamber property.
+// X_cw = combustion chamber wall property.
+// X_nzl = nozzle property.
+// X_throat = nozzle throat property.
+// X_exit = nozzle exit property.
+// X_locked = locked section property.
 //
-// X_t = tank
-// X_c = cc
-// X_w = tank wall (for heat sink)
-// X_a = ambient
+// X_l = liquid oxidiser property.
+// X_v = vapour oxidiser property.
+// X_o = general oxidiser property.
+// X_u = injector upstream property (tank-side).
+// X_d = injector downstream property (cc-side).
+// X_f = fuel property.
+// X_reg = fuel regression property.
+// X_g = cc gases property.
+// X_n = added cc gases property.
 //
-// X_inj = injector
-// X_u = upstream (tank-side of injector)
-// X_d = downstream (cc-side of injector)
-//
-// X_nzl = nozzle
-//
-// X_reg = regression (fuel erosion/vapourisation)
+// Legend for 'X':
+// A = area.
+// a = speed of sound.
+// acc = acceleration.
+// alt = altitude relative to sea-level.
+// C = heat capacity of a solid.
+// c = mass-specific heat capacity of a solid.
+// CD = drag coefficient.
+// Cd = discharge coefficient.
+// com = centre of mass relative to top, where positive is fin-wards.
+// Cp = constant pressure heat capacity.
+// cp = constant pressure mass-specific heat capacity.
+// Cv = constant volume heat capacity.
+// cv = constant volume mass-specific heat capacity.
+// D = diameter.
+// eps = nozzle exit area to throat area ratio.
+// F = force.
+// G = mass flux.
+// g = (downwards) acceleration due to gravity.
+// H = enthalpy.
+// h = mass-specific enthalpy.
+// ID = inner diameter.
+// Ivac = specific impulse in vaccuum.
+// L = length.
+// m = mass.
+// Mw = molar mass.
+// N = number of moles.
+// OD = outer diameter.
+// ofr = oxidiser-fuel ratio.
+// P = pressure.
+// Pr = pressure ratio.
+// Pcrit = critical point pressure.
+// Psat = saturated pressure.
+// Ptrip = triple point pressure.
+// R = specific gas constant.
+// rho = mass density.
+// rhosat = saturated mass density.
+// S = entropy.
+// s = mass-specific entropy.
+// sf = safety factor.
+// T = temperature.
+// t = time.
+// th = thickness.
+// Tcrit = critical point temperature.
+// Tsat = saturated temperature.
+// Ttrip = triple point temperature.
+// U = internal energy.
+// u = mass-specific internal energy.
+// V = volume.
+// v = mass-specific volume.
+// vel = velocity.
+// vff = volumetric fill fraction.
+// x = saturated mixture vapour quality.
+// y = ratio of specific heats (gamma).
+// Ys = yield strength.
+// Z = compressibility factor.
+
+
+// Public types:
+typedef double Input;   // independant input parameter
+typedef double Output;  // generated output parameter.
+
+// Private types:
+typedef double Running; // time-dependant constantly-updated parameter.
+typedef int RunningI;   // integer of that ^.
 
 
 typedef struct broState {
-    // Tracked state (all of which changes over time and are described by
-    // differentials) is:
-    double* t;       // time.
-    double* T_t;     // tank temperature.
-    double* m_l;     // tank liquid mass (happens to always be saturated).
-    double* m_v;     // tank vapour mass (only saturated if m_l > negligible).
-    double* D_f;     // fuel grain inner diameter.
-    double* m_g;     // cc gas mass.
-    double* nmol_g;  // cc gas number of moles.
-    double* T_g;     // cc gas temperature.
-    double* Cp_g;    // cc gas constant pressure heat capacity.
-    // This is enough to fully define the system at all times (when combined with
-    // other constant parameters).
+    // NOTE: any changes to this struct must be mirrored in the cython bridging
+    //       struct.
 
-    int upto;        // current length of ^ those arrays.
-    int count;       // maximum length of ^ those arrays.
+    Input target_apogee;
 
-    double V_t;      // tank volume.
+    Input m_locked;
+    Input L_locked;
+    Input com_locked;
 
-    double C_w;      // tank wall heat capacity (note Cv ~= Cp for solids).
+    Input D_r;
+    Input alt0_r;
 
-    double vff0_o;   // ox initial volumetric fill fraction.
+    Input T_a;
 
-    double Cd_inj;   // injector discharge coeff.
-    double A_inj;    // injector orifice area.
+    Input L_tw;
+    Input rho_tw;
+    Input Ys_tw;
+    Input c_tw;
+    Input sf_tw;
+    Output V_t;
+    Output m_tw;
+    Output C_tw;
 
-    double L_f;      // fuel length.
-    double D0_f;     // initial fuel inner diameter.
+    Input vff0_l;
 
-    double D_c;      // cc diameter.
-    double eta_c;    // cc combustion efficiency.
-    double Vempty_c; // empty (no fuel) cc volume.
+    Input m_mov;
+    Input L_mov;
+    Input com_mov;
 
-    double Cd_nzl;   // nozzle discharge coeff.
-    double A_nzl;    // nozzle throat area.
-    double eps_nzl;  // nozzle exit area to throat area ratio.
+    Input m_inj;
+    Input L_inj;
+    Input com_inj;
+    Input Cd_inj;
+    Input A_inj;
 
-    double T_a;      // ambient temperature.
-    double P_a;      // ambient pressure.
-    double rho_a;    // ambient density.
-    double Mw_a;     // ambient molar mass.
-    double cp_a;     // ambient constant pressure specific heat capacity.
+    Input D_c;
+    Input rho_cw;
+    Input Ys_cw;
+    Input sf_cw;
+    Output L_c;
+    Output Vempty_c;
+    Output m_cw;
+    Output th_cw;
 
-    // NOTE: any changes to this must be reflected in the cython wrapping class.
+    Input L_f;
+    Input th0_f;
+
+    Input Cd_nzl;
+    Input eps;
+    Input A_throat;
+    Output L_nzl;
+    Output m_nzl;
+
+
+    RunningI onfire;
+    Running t;
+    Running T_t;
+    Running m_l;
+    Running m_v;
+    Running ID_f;
+    Running m_g;
+    Running N_g;
+    Running T_g;
+    Running Cp_g;
+    Running Cv_g;
+    Running alt_r;
+    Running vel_r;
+
+
+    // Optional output parameters:
+    // These buffers must be supplied by the user, and each must be either null
+    // or contain at-least `count` elements. If `count` is 0, all buffers are
+    // assumed to be null. `upto` contains the index of the next write into those
+    // categories buffers, aka the number of elements already written provided it
+    // was set to 0 before simming.
+
+    int upto;  // input.
+    int count; // input.
+    Output* out_t;
+    Output* out_alt_r;
+    Output* out_vel_r;
+    Output* out_acc_r;
+    Output* out_m_r;
+    Output* out_com_r;
+    Output* out_T_t;
+    Output* out_T_g;
+    Output* out_P_t;
+    Output* out_P_c;
+    Output* out_P_a;
+    Output* out_m_l; // always saturated.
+    Output* out_m_v; // only saturated if m_l > negligible.
+    Output* out_m_f;
+    Output* out_dm_inj; // oxidiser injector mass flow rate.
+    Output* out_dm_reg; // fuel regression mass flow rate.
+    Output* out_dm_out; // exhaust mass flow rate.
+    Output* out_m_g;
+    Output* out_cp_g;
+    Output* out_cv_g;
+    Output* out_y_g;
+    Output* out_ofr;
+    Output* out_Fthrust;
+    Output* out_Fdrag;
+    Output* out_Fgravity;
 } broState;
 
 
-// Simulates the burn and returns how many elements of the state arrays were
-// used. Expected all members of `s` to be set (but the array data will be
-// overwritten).
+// Simulates the given state, writing all its outputs.
 __declspec(dllexport) void bro_sim(broState* s);
 
 

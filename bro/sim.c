@@ -61,6 +61,9 @@ static jmp_buf _assert_jump;
 
 
 
+#define UNSET (__builtin_nan(""))
+#define ISSET(x) ((x) == (x))
+
 
 #define PI (3.141592653589793) // pi
 #define PI_4 (0.7853981633974483) // pi/4
@@ -76,6 +79,80 @@ local f64 tube_vol(f64 L, f64 ID, f64 OD) {
 }
 
 
+typedef struct Pipe {
+    f64 L; // cannot be unset.
+    f64 ID;
+    f64 OD;
+} Pipe;
+local f64 pipe_th(const Pipe* pipe) {
+    assert(ISSET(pipe->ID));
+    assert(ISSET(pipe->OD));
+    return 0.5 * (pipe->OD - pipe->ID);
+}
+local f64 pipe_V(Pipe* pipe) {
+    assert(ISSET(pipe->ID));
+    assert(ISSET(pipe->OD));
+    return tube_vol(pipe->L, pipe->ID, pipe->OD);
+}
+local void pipe_set_th(Pipe* pipe, f64 th) {
+    assert(ISSET(pipe->ID) + ISSET(pipe->OD) != 2);
+    assert(ISSET(pipe->ID) + ISSET(pipe->OD) != 0);
+    if (ISSET(pipe->ID)) {
+        pipe->OD = pipe->ID + 2.0*th;
+    } else {
+        pipe->ID = pipe->OD - 2.0*th;
+        assert(pipe->ID >= 0.0);
+    }
+}
+local void pipe_set_th_for_P(Pipe* pipe, f64 Ys, f64 P, f64 sf) {
+    // Finding min thickness for hoop stress, using thin-walled approximation:
+    //  th = sf * P * ((ID + OD) / 2) / (2 * Ys)
+    // Redefine:
+    // P = sf * P
+    // Ys = 2 * Ys
+    // => th = P * (ID + OD) / (2 * Ys)
+    // Consider:
+    // OD = ID + 2*th  [constrained inner diameter]
+    //  th = P * (2*ID + 2*th) / (2 * Ys)
+    //  th = P * (ID + th) / Ys
+    //  th = P/Ys * ID + P/Ys * th
+    //  th - P/Ys * th = P/Ys * ID
+    //  th * (1 - P/Ys) = P/Ys * ID
+    //  th * (Ys - P) = P * ID
+    // => th = P * ID / (Ys - P)
+    // Consider:
+    // ID = OD - 2*th  [constrained outer diameter]
+    //  th = P * (2*OD - 2*th) / (2 * Ys)
+    //  th = P * (OD - th) / Ys
+    //  th = P/Ys * OD - P/Ys * th
+    //  th + P/Ys * th = P/Ys * OD
+    //  th * (1 + P/Ys) = P/Ys * OD
+    //  th * (Ys + P) = P * OD
+    // => th = P * OD / (Ys + P)
+    // Note that these relations mean it is not always possible to construct a
+    // thick enough tank (in either sitation).
+    assert(ISSET(pipe->ID) + ISSET(pipe->OD) != 2);
+    assert(ISSET(pipe->ID) + ISSET(pipe->OD) != 0);
+    // Do "redefines".
+    P *= sf;
+    Ys *= 2.0;
+    if (ISSET(pipe->ID)) {
+        f64 th = P * pipe->ID / (Ys - P);
+        pipe->OD = pipe->ID + 2.0*th;
+    } else {
+        f64 th = P * pipe->OD / (Ys + P);
+        pipe->ID = pipe->OD - 2.0*th;
+    }
+    // Undo "redefines".
+    P /= sf;
+    Ys /= 2.0;
+    // Check its a solveable situation.
+    assertx(pipe->OD > pipe->ID, "Ys=%fPa, P=%fPa, sf=%f", Ys/2.0, P/sf, sf);
+    assertx(pipe->ID > 0.0, "Ys=%fPa, P=%fPa, sf=%f", Ys/2.0, P/sf, sf);
+}
+
+
+
 // Returns `2^exp`, requiring `exp` to be an integer.
 local f64 br_with_exp(i32 exp) {
     assertx(-1022 <= exp && exp <= 1023, "exp=%d", exp);
@@ -87,7 +164,8 @@ local f64 br_with_exp(i32 exp) {
     return f;
 }
 
-// Finds `fraction` and `exponent` s.t. `pos_norm_f = fraction * 2^exponent`.
+// Finds `fraction` and `exponent` s.t. `pos_norm_f = fraction * 2^exponent`,
+// where `fraction` is in [1, 2).
 local f64 br_fsplit(f64 pos_norm_f, i32* exp) {
     assertx(pos_norm_f == pos_norm_f && pos_norm_f >= 2.2250738585072014e-308 &&
             pos_norm_f != __builtin_inf(), "f=%f", pos_norm_f);
@@ -236,6 +314,7 @@ local f64 br_fabs(f64 x) {
 
 // Straight off the dome.
 #define GAS_CONSTANT (8.31446261815324) // [J/mol/K]
+#define STANDARD_GRAVITY (9.80665) // [m/s^2]
 
 
 
@@ -253,12 +332,20 @@ local f64 br_fabs(f64 x) {
 //  vap. density   1 kg/m3 .. 325 kg/m3
 // Note that all inputs and outputs are base si.
 
-#define N2O_IN_T(T) (183 <= (T) && (T) <= 309)
-#define N2O_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
-#define N2O_IN_rho(rho) (1 <= (rho) && (rho) <= 325)
+#define N2O_Tmin (183.0)
+#define N2O_Pmin (90e3)
+#define N2O_rhomin (1.0)
 
-#define N2O_ASSERT_IN_T(T) assertx(N2O_IN_T((T)), "T=%fK", (T))
-#define N2O_ASSERT_IN_P(P) assertx(N2O_IN_P((P)), "P=%fMPa", (P))
+#define N2O_IN_T(T) (183.0 <= (T) && (T) <= 309.0)
+#define N2O_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
+#define N2O_IN_rho(rho) (1.0 <= (rho) && (rho) <= 325.0)
+
+#define N2O_ASSERT_IN_T(T) do {                 \
+        assertx(N2O_IN_T((T)), "T=%fK", (T));   \
+    } while (0)
+#define N2O_ASSERT_IN_P(P) do {                 \
+        assertx(N2O_IN_P((P)), "P=%fMPa", (P)); \
+    } while (0)
 #define N2O_ASSERT_IN_Trho(T, rho) do {                                 \
         assertx(N2O_IN_T((T)), "T=%fK, rho=%fkg/m3", (T), (rho));       \
         assertx(N2O_IN_rho((rho)), "T=%fK, rho=%fkg/m3", (T), (rho));   \
@@ -272,12 +359,16 @@ local f64 br_fabs(f64 x) {
 
 #define N2O_Mw (44.013e-3) // [kg/mol]
 #define N2O_R (GAS_CONSTANT / N2O_Mw) // [J/kg/K]
+#define N2O_Ttrip (182.34) // [K]
+#define N2O_Ptrip (87.85e3) // [Pa]
+#define N2O_Tcrit (309.55) // [K]
+#define N2O_Pcrit (7.245e6) // [Pa]
 
 local f64 N2O_Tsat(f64 P) {
     P *= 1e-6; // Pa -> MPa
     N2O_ASSERT_IN_P(P);
     f64 x1 = P;
-    f64 x2 = P*P;
+    f64 x2 = x1*x1;
     f64 n0 = +1.053682149480346;
     f64 n1 = +5.000029230803551;
     f64 d0 = +0.0063155487831695655;
@@ -291,7 +382,7 @@ local f64 N2O_Tsat(f64 P) {
 local f64 N2O_rho_satliq(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
+    f64 x2 = x1*x1;
     f64 n0 = +122309.80087089837;
     f64 n1 = -703.8266867155928;
     f64 d0 = +78.84320429264461;
@@ -305,7 +396,7 @@ local f64 N2O_rho_satliq(f64 T) {
 local f64 N2O_rho_satvap(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
+    f64 x2 = x1*x1;
     f64 x4 = x2*x2;
     f64 n0 = -5616563626.488913;
     f64 n1 = +75961789.44613385;
@@ -321,8 +412,8 @@ local f64 N2O_rho_satvap(f64 T) {
 local f64 N2O_Psat(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
-    f64 x3 = x2*T;
+    f64 x2 = x1*x1;
+    f64 x3 = x2*x1;
     f64 x5 = x3*x2;
     f64 c1 = +3496.03701234121;
     f64 c3 = -0.248418557185819;
@@ -333,9 +424,10 @@ local f64 N2O_Psat(f64 T) {
 local f64 N2O_P(f64 T, f64 rho) {
     N2O_ASSERT_IN_Trho(T, rho);
     f64 x1 = T;
-    f64 y2 = rho*rho;
-    f64 x2y1 = T*T*rho;
-    f64 y3 = y2*rho;
+    f64 y1 = rho;
+    f64 y2 = y1*y1;
+    f64 x2y1 = x1*x1*y1;
+    f64 y3 = y2*y1;
     f64 n5 = -1002.3823520461443;
     f64 n7 = +3.7137717864729005;
     f64 d1 = +0.019689134939176935;
@@ -348,9 +440,9 @@ local f64 N2O_s_satliq(f64 P) {
     P *= 1e-6; // Pa -> MPa
     N2O_ASSERT_IN_P(P);
     f64 x1 = P;
-    f64 x2 = P*P;
+    f64 x2 = x1*x1;
     f64 x4 = x2*x2;
-    f64 x5 = x4*P;
+    f64 x5 = x4*x1;
     f64 n0 = -355.8755188448979;
     f64 n1 = +3779.467529165695;
     f64 n4 = -13.18529083615938;
@@ -366,8 +458,8 @@ local f64 N2O_s_satvap(f64 P) {
     P *= 1e-6; // Pa -> MPa
     N2O_ASSERT_IN_P(P);
     f64 x1 = P;
-    f64 x2 = P*P;
-    f64 x3 = x2*P;
+    f64 x2 = x1*x1;
+    f64 x3 = x2*x1;
     f64 n0 = +106.29753009318405;
     f64 n1 = +275.8845939008316;
     f64 n2 = -45.72111883807674;
@@ -384,8 +476,8 @@ local f64 N2O_cp(f64 T, f64 P) {
     N2O_ASSERT_IN_TP(T, P);
     f64 x1 = T;
     f64 y1 = P;
-    f64 x2 = T*T;
-    f64 y2 = P*P;
+    f64 x2 = x1*x1;
+    f64 y2 = y1*y1;
     f64 n1 = -159.82009434320338;
     f64 n2 = -4999.721561359963;
     f64 d1 = -0.16874605625391056;
@@ -400,8 +492,8 @@ local f64 N2O_cp(f64 T, f64 P) {
 local f64 N2O_cv_satliq(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
-    f64 x3 = x2*T;
+    f64 x2 = x1*x1;
+    f64 x3 = x2*x1;
     f64 n0 = +99998624.02836193;
     f64 n1 = -417287.50625049777;
     f64 d0 = +67167.41562085839;
@@ -415,8 +507,8 @@ local f64 N2O_cv_satliq(f64 T) {
 local f64 N2O_cv_satvap(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
-    f64 x3 = x2*T;
+    f64 x2 = x1*x1;
+    f64 x3 = x2*x1;
     f64 n1 = +1053181.5139038756;
     f64 n2 = -3536.041105280067;
     f64 d0 = +319981.2745750608;
@@ -431,9 +523,9 @@ local f64 N2O_cv(f64 T, f64 P) {
     N2O_ASSERT_IN_TP(T, P);
     f64 x1 = T;
     f64 y1 = P;
-    f64 x2 = T*T;
-    f64 x1y1 = T*P;
-    f64 y2 = P*P;
+    f64 x2 = x1*x1;
+    f64 x1y1 = x1*y1;
+    f64 y2 = y1*y1;
     f64 n2 = +404.17179888559093;
     f64 n3 = +0.0116226190297697;
     f64 n4 = -1.6302745906659892;
@@ -448,8 +540,8 @@ local f64 N2O_cv(f64 T, f64 P) {
 local f64 N2O_h_satliq(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x3 = T*T*T;
-    f64 x4 = x3*T;
+    f64 x3 = x1*x1*x1;
+    f64 x4 = x3*x1;
     f64 n0 = -1554844073854.8723;
     f64 n1 = +10248538986.948492;
     f64 n3 = -53363.27024534557;
@@ -463,7 +555,7 @@ local f64 N2O_h_satliq(f64 T) {
 local f64 N2O_h_satvap(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
+    f64 x2 = x1*x1;
     f64 x4 = x2*x2;
     f64 n0 = +36006860815.96613;
     f64 n1 = -145833527.21804488;
@@ -479,7 +571,7 @@ local f64 N2O_h(f64 T, f64 rho) {
     N2O_ASSERT_IN_Trho(T, rho);
     f64 x1 = T;
     f64 y1 = rho;
-    f64 x2 = T*T;
+    f64 x2 = x1*x1;
     f64 n1 = +72.32632139879598;
     f64 d0 = -0.051735087047641605;
     f64 d1 = +0.000958993783893223;
@@ -492,8 +584,8 @@ local f64 N2O_h(f64 T, f64 rho) {
 local f64 N2O_u_satliq(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
-    f64 x3 = x2*T;
+    f64 x2 = x1*x1;
+    f64 x3 = x2*x1;
     f64 n0 = -5712868562742.414;
     f64 n1 = +48367409598.93219;
     f64 n2 = -94710942.69677454;
@@ -507,7 +599,7 @@ local f64 N2O_u_satliq(f64 T) {
 local f64 N2O_u_satvap(f64 T) {
     N2O_ASSERT_IN_T(T);
     f64 x1 = T;
-    f64 x2 = T*T;
+    f64 x2 = x1*x1;
     f64 x4 = x2*x2;
     f64 n0 = +40973028771.259094;
     f64 n1 = -161630532.82151473;
@@ -523,7 +615,7 @@ local f64 N2O_u(f64 T, f64 rho) {
     N2O_ASSERT_IN_Trho(T, rho);
     f64 x1 = T;
     f64 y1 = rho;
-    f64 x2 = T*T;
+    f64 x2 = x1*x1;
     f64 n1 = +133.30350610563823;
     f64 n2 = -47.121524818758765;
     f64 d0 = -0.05688971632749395;
@@ -536,9 +628,10 @@ local f64 N2O_u(f64 T, f64 rho) {
 
 local f64 N2O_Z(f64 T, f64 rho) {
     N2O_ASSERT_IN_Trho(T, rho);
+    f64 x1 = T;
     f64 y1 = rho;
-    f64 x1y1 = T*rho;
-    f64 y2 = rho*rho;
+    f64 x1y1 = x1*y1;
+    f64 y2 = y1*y1;
     f64 c0 = +0.9962244155069389;
     f64 c2 = -0.010033321729222494;
     f64 c4 = +2.3783799563418678e-05;
@@ -548,8 +641,23 @@ local f64 N2O_Z(f64 T, f64 rho) {
 
 
 
-// Paraffin+N2O CEA results from rocketcea, approximated via rational polynomials
-// and look-up-tables-with-biasing(tm) by 'bro/approximator.py'.
+// Paraffin properties from Hybrid Rocket Propulsion Handbook, Karp & Jens.
+
+#define PARAFFIN_rho (924.5) // [kg/m^3]
+
+
+
+// Paraffin+N2O regression rate constants from Hybrid Rocket Propulsion Handbook,
+// Karp & Jens.
+
+local f64 regression_rate_rdot(f64 G_o) {
+    return 1.55e-4 * br_sqrt(G_o);
+}
+
+
+
+// Paraffin+N2O CEA results from NASA CEA2, approximated via rational
+// polynomials and lookup-tables-with-biasing(tm) by 'bro/approximator.py'.
 
 // For the bounds of the inputs, we use:
 //  chamber pressure     90 kPa .. 7.2 Mpa
@@ -557,12 +665,19 @@ local f64 N2O_Z(f64 T, f64 rho) {
 //  exit-throat area ratio  1.2 .. 12
 // Note that all inputs and outputs are base si.
 
-#define CEA_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
-#define CEA_IN_ofr(ofr) (0.5 <= (ofr) && (ofr) <= 13)
-#define CEA_IN_eps(eps) (1.2 <= (eps) && (eps) <= 12)
+#define CEA_Pmin (90e3) // [Pa]
+#define CEA_ofrmin (0.5) // [-]
 
-#define CEA_ASSERT_IN_P(P) assertx(CEA_IN_P((P)), "P=%fMPa", (P))
-#define CEA_ASSERT_IN_ofr(ofr) assertx(CEA_IN_ofr((ofr)), "ofr=%f", (ofr))
+#define CEA_IN_P(P) (0.09 <= (P) && (P) <= 7.2)
+#define CEA_IN_ofr(ofr) (0.5 <= (ofr) && (ofr) <= 13.0)
+#define CEA_IN_eps(eps) (1.2 <= (eps) && (eps) <= 12.0)
+
+#define CEA_ASSERT_IN_P(P) do {                 \
+        assertx(CEA_IN_P((P)), "P=%fMPa", (P)); \
+    } while (0)
+#define CEA_ASSERT_IN_ofr(ofr) do {                     \
+        assertx(CEA_IN_ofr((ofr)), "ofr=%f", (ofr));    \
+    } while (0)
 #define CEA_ASSERT_IN_Pofr(P, ofr) do {                             \
         assertx(CEA_IN_P((P)), "P=%fMPa, ofr=%f", (P), (ofr));      \
         assertx(CEA_IN_ofr((ofr)), "P=%fMPa, ofr=%f", (P), (ofr));  \
@@ -576,17 +691,17 @@ local f64 N2O_Z(f64 T, f64 rho) {
     } while (0)
 
 
-local f64 cea_T(f64 P, f64 ofr) {
+local f64 cea_T_c(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
     CEA_ASSERT_IN_Pofr(P, ofr);
     // Different approxs for different input regions.
     if (ofr >= 4) {
         f64 x1 = P;
         f64 y1 = ofr;
-        f64 x1y1 = P*ofr;
-        f64 y2 = ofr*ofr;
-        f64 x2y1 = x1y1*P;
-        f64 x1y2 = x1y1*ofr;
+        f64 x1y1 = x1*y1;
+        f64 y2 = y1*y1;
+        f64 x2y1 = x1y1*x1;
+        f64 x1y2 = x1y1*y1;
         f64 n0 = -14.288432205175953;
         f64 n1 = -32.42867599262846;
         f64 n2 = +3.474751778815847;
@@ -602,7 +717,7 @@ local f64 cea_T(f64 P, f64 ofr) {
     }
     f64 x1 = P;
     f64 y1 = ofr;
-    f64 x1y1 = P*ofr;
+    f64 x1y1 = x1*y1;
     f64 n0 = +4.626249969485239;
     f64 n1 = +4.2414906007771505;
     f64 d0 = +0.006265099088905423;
@@ -614,18 +729,18 @@ local f64 cea_T(f64 P, f64 ofr) {
     return Num / Den;
 }
 
-local f64 cea_cp(f64 P, f64 ofr) {
+local f64 cea_cp_c(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
     CEA_ASSERT_IN_Pofr(P, ofr);
     // Different approxs for different input regions.
     if (ofr >= 4) {
         f64 x1 = P;
         f64 y1 = ofr;
-        f64 x1y1 = P*ofr;
-        f64 x3 = P*P*P;
-        f64 x2y1 = x1y1*P;
-        f64 x1y2 = x1y1*ofr;
-        f64 y3 = ofr*ofr*ofr;
+        f64 x1y1 = x1*y1;
+        f64 x3 = x1*x1*x1;
+        f64 x2y1 = x1y1*x1;
+        f64 x1y2 = x1y1*y1;
+        f64 y3 = y1*y1*y1;
         f64 n1 = +3697.2499992698126;
         f64 n4 = -936.4542475610451;
         f64 n6 = +0.9270759227273586;
@@ -644,9 +759,9 @@ local f64 cea_cp(f64 P, f64 ofr) {
     if (P >= 1) {
         f64 x1 = P;
         f64 y1 = ofr;
-        f64 x1y1 = P*ofr;
-        f64 y2 = ofr*ofr;
-        f64 x1y2 = x1y1*ofr;
+        f64 x1y1 = x1*y1;
+        f64 y2 = y1*y1;
+        f64 x1y2 = x1y1*y1;
         f64 n0 = +4.2606478633549125;
         f64 n1 = +0.286474125290797;
         f64 n2 = -3.346916554110677;
@@ -662,12 +777,12 @@ local f64 cea_cp(f64 P, f64 ofr) {
     }
     f64 x1 = P;
     f64 y1 = ofr;
-    f64 x2 = P*P;
-    f64 x1y1 = P*ofr;
-    f64 y2 = ofr*ofr;
-    f64 x2y1 = x1y1*P;
-    f64 x1y2 = x1y1*ofr;
-    f64 y3 = y2*ofr;
+    f64 x2 = x1*x1;
+    f64 x1y1 = x1*y1;
+    f64 y2 = y1*y1;
+    f64 x2y1 = x1y1*x1;
+    f64 x1y2 = x1y1*y1;
+    f64 y3 = y2*y1;
     f64 n0 = +2.8961711401281796;
     f64 n1 = +1.380267785409765;
     f64 n2 = -2.959235197532152;
@@ -686,14 +801,60 @@ local f64 cea_cp(f64 P, f64 ofr) {
     return Num / Den;
 }
 
-local f64 cea_Mw(f64 P, f64 ofr) {
+local f64 cea_y_throat(f64 P, f64 ofr) {
+    P *= 1e-6; // Pa -> MPa
+    CEA_ASSERT_IN_Pofr(P, ofr);
+    if (ofr >= 3.07) {
+        f64 x1 = P;
+        f64 y1 = ofr;
+        f64 x1y1 = x1*y1;
+        f64 y2 = y1*y1;
+        f64 x1y2 = x1y1*y1;
+        f64 n0 = -2.9309092389810942;
+        f64 n1 = +10.897607957141895;
+        f64 n2 = -6.046792817383578;
+        f64 n4 = -0.8706749287437507;
+        f64 d1 = +7.685381299036463;
+        f64 d2 = -5.7290230856550375;
+        f64 d4 = -0.40591530228463435;
+        f64 d5 = +0.8912798496664587;
+        f64 d8 = -0.017711953717497203;
+        f64 Num = n0 + n1*x1 + n2*y1 + n4*x1y1 + y2;
+        f64 Den = d1*x1 + d2*y1 + d4*x1y1 + d5*y2 + d8*x1y2;
+        return Num / Den;
+    }
+    f64 x1 = P;
+    f64 y1 = ofr;
+    f64 x2 = x1*x1;
+    f64 x1y1 = x1*y1;
+    f64 y2 = y1*y1;
+    f64 x3 = x2*x1;
+    f64 x2y1 = x1y1*x1;
+    f64 x2y2 = x1y1*x1y1;
+    f64 n0 = -0.11263466290978147;
+    f64 n1 = +0.10384675996676593;
+    f64 n2 = +0.02920480705193921;
+    f64 n3 = +0.6036341368237339;
+    f64 n4 = -1.4356038387210333;
+    f64 d3 = +0.4996068573643659;
+    f64 d4 = -1.069986102678251;
+    f64 d5 = +0.7620770586156876;
+    f64 d6 = +0.00039374249322294956;
+    f64 d7 = -0.019399944085301078;
+    f64 d12 = +0.0019976937469849713;
+    f64 Num = n0 + n1*x1 + n2*y1 + n3*x2 + n4*x1y1 + y2;
+    f64 Den = d3*x2 + d4*x1y1 + d5*y2 + d6*x3 + d7*x2y1 + d12*x2y2;
+    return Num / Den;
+}
+
+local f64 cea_Mw_c(f64 P, f64 ofr) {
     P *= 1e-6; // Pa -> MPa
     CEA_ASSERT_IN_Pofr(P, ofr);
     f64 x1 = P;
     f64 y1 = ofr;
-    f64 x2 = P*P;
-    f64 x1y1 = P*ofr;
-    f64 y2 = ofr*ofr;
+    f64 x2 = x1*x1;
+    f64 x1y1 = x1*y1;
+    f64 y2 = y1*y1;
     f64 n0 = +0.21182839008473092;
     f64 n1 = +0.7393450040280863;
     f64 n3 = +0.004477743899937738;
@@ -748,8 +909,9 @@ local f64 cea_Ivac(f64 P, f64 ofr, f64 eps) {
     // bytes).
     CEA_ASSERT_IN_Pofreps(P, ofr, eps);
 
-    // ofr needs typical lookup (note 0.0001 term added to avoid indexing oob).
-    i32 i = (i32)((ofr - 0.5) / (13.0 - 0.5) * (10.0 + 0.0001));
+    // ofr needs typical lookup.
+    i32 i = (i32)((ofr - 0.5) / (13.0 - 0.5) * 10);
+    if (i == 10) --i; // dont index oob.
     f64 ii = ofr - i;
     // P and eps are biased before being looked up using some fuckass formula
     // (https://www.desmos.com/calculator/okiztovx6y). Also note only two
@@ -777,36 +939,146 @@ local f64 cea_Ivac(f64 P, f64 ofr, f64 eps) {
 
 
 
-// Atmospheric pressure from some formulas idk, approximated via rational
-// polynomials by 'bro/approximator.py'.
+// Ambient properties from the International Standard Atmosphere, approximated
+// via rational polynomials by 'bro/approximator.py'.
 
-local f64 atmos_Pa(f64 altitude) {
-    f64 x1 = altitude + 10000.0; // need some offset to avoid /0.
+// These functions accept any altitude, but default to a return of 0 above 60km
+// and a return as-if at 0km when given below 0km. Note that all inputs and
+// outputs are base si.
+
+
+#define AMB_STANDARD_CONDITIONS_cp (1005.0) // [J/kg/K]
+#define AMB_Mw (28.9647e-3) // [kg/mol]
+#define AMB_R (GAS_CONSTANT / AMB_Mw) // [J/kg/K]
+
+local f64 amb_P(f64 alt) {
+    // Just say properties below sea level are constant.
+    if (alt < 0.0)
+        alt = 0.0;
+    // Above 60k, its about 0 pressure (21.5 Pa at 60k, 0.021% of sea level).
+    if (alt > 60e3)
+        return 0.0;
+    // Different approxs for different regions.
+    if (alt > 20.063e3) {
+        f64 x1 = alt;
+        f64 x2 = x1*x1;
+        f64 n0 = +2839481483.3687034;
+        f64 n1 = -103143.5518901285;
+        f64 d0 = +239165.4892657625;
+        f64 d1 = -24.24291511989479;
+        f64 d2 = +0.00114675186987331;
+        f64 Num = n0 + n1*x1 + x2;
+        f64 Den = d0 + d1*x1 + d2*x2;
+        return Num / Den;
+    }
+    f64 x1 = alt + 10e3; // need some offset to avoid /0.
     f64 x2 = x1*x1;
-    f64 n0 = +4163420288.511369;
-    f64 n1 = -127550.45177127342;
-    f64 d0 = +53823.7243981808;
-    f64 d1 = -3.3969727188689047;
-    f64 d2 = +6.709829651497073e-05;
+    f64 n0 = +1326889135.6347075;
+    f64 n1 = -70527.4205624988;
+    f64 d0 = +5522.836249663364;
+    f64 d2 = +1.6121842727811546e-05;
+    f64 Num = n0 + n1*x1 + x2;
+    f64 Den = d0 + d2*x2;
+    return Num / Den;
+}
+
+local f64 amb_rho(f64 alt) {
+    // Just say properties below sea level are constant.
+    if (alt < 0.0)
+        alt = 0.0;
+    // Above 60k, its about 0 density (0.303 g/m^3 at 60k, 0.025% of sea level).
+    if (alt > 60e3)
+        return 0.0;
+    // Different approxs for different regions.
+    if (alt > 20.063e3) {
+        f64 x1 = alt;
+        f64 x2 = x1*x1;
+        f64 n0 = +2239506917.973228;
+        f64 n1 = -92441.9508707563;
+        f64 d0 = -65681468.84943648;
+        f64 d2 = +22.324464921748664;
+        f64 Num = n0 + n1*x1 + x2;
+        f64 Den = d0 + d2*x2;
+        return Num / Den;
+    }
+    f64 x1 = alt + 10e3; // offset to avoid /0.
+    f64 x2 = x1*x1;
+    f64 n0 = +1080314808.6263719;
+    f64 n1 = -64847.90278878072;
+    f64 d0 = +345190107.69729966;
+    f64 d1 = +12653.90131058989;
+    f64 d2 = -0.37409509100171673;
     f64 Num = n0 + n1*x1 + x2;
     f64 Den = d0 + d1*x1 + d2*x2;
     return Num / Den;
 }
 
+local f64 amb_a(f64 alt) {
+    // Just say properties below sea level are constant.
+    if (alt < 0.0)
+        alt = 0.0;
+    // Above 60k, the speed of sound keeps changing but we dont keep calcing it,
+    // since we'd only ever use it together with density for it becomes
+    // irrelevant.
+    if (alt > 60e3)
+        alt = 60e3;
+    f64 x1 = alt + 10e3; // offset to avoid /0.
+    f64 x2 = x1*x1;
+    f64 x3 = x2*x1;
+    f64 x4 = x3*x1;
+    f64 n1 = +2453911045.412046;
+    f64 d0 = +27961612000.005264;
+    f64 d1 = -46762.970478368705;
+    f64 d2 = +565.8014318466305;
+    f64 d3 = -0.00988835027584721;
+    f64 d4 = +9.180518407728973e-08;
+    f64 Num = n1*x1 + x3;
+    f64 Den = d0 + d1*x1 + d2*x2 + d3*x3 + d4*x4;
+    return Num / Den;
+}
+
+// oh yeah we modelling gravity dropoff in this bitch.
+local f64 amb_g(f64 alt) {
+    // Newtons law of universal gravitation:
+    //  F = G*M*m / r^2
+    //  g = G*M / r^2
+    // let:
+    // R = 6.3568e6  [radius of earth]
+    // g0 = G*M / R^2  [standard gravity]
+    //  g = G*M / r^2 * R^2 / R^2
+    //  g = R^2 / r^2 * G*M / R^2
+    //  g = R^2 / r^2 * g0
+    //  g = R^2 / (R + alt)^2 * g0
+    f64 R = 6.3568e6;
+    f64 factor = R / (R + alt);
+    return STANDARD_GRAVITY * factor*factor;
+}
 
 
 
-// Paraffin properties from Hybrid Rocket Propulsion Handbook, Karp & Jens.
 
-#define PARAFFIN_rho (924.5) // [kg/m^3]
+// Rocket properties from Lemaire aerodynamic data, approximated via rational
+// polynomials.
+// TODO: use real rocket cd
+
+local f64 rocket_CD(f64 mach) {
+    // https://www.desmos.com/calculator/lbmxixzaiu
+    f64 n0 = +0.259939613952;
+    f64 n1 = -0.0252166618307;
+    f64 n2 = -0.809172430601;
+    f64 n3 = +0.641098370634;
+    f64 d0 = +0.731852733359;
+    f64 d1 = +0.630499692542;
+    f64 d2 = -3.3620559129;
+    f64 d3 = +2.12978762124;
+    return (
+        (n0 + mach*(n1 + mach*(n2 + mach*n3)))
+        /
+        (d0 + mach*(d1 + mach*(d2 + mach*d3)))
+    );
+}
 
 
-
-// Paraffin+N2O regression rate constants from Hybrid Rocket Propulsion Handbook,
-// Karp & Jens.
-
-#define RR_a0 (1.55e-4) // [-]
-#define RR_n (0.5) // [-]
 
 
 
@@ -815,111 +1087,337 @@ local f64 atmos_Pa(f64 altitude) {
 #define Dt (0.001) // [s], discrete calculus over time.
 #define DT (0.05) // [K], discrete calculus over temperature.
 #define GOTIME_STEPS (8) // [-], number of steps to take when gotiming.
-#define MAX_TIME (35) // [s], stop sim after this time.
-#define NEGLIGIBLE_MASS (0.001) // [kg], assume nothing if <= this.
-#define STARTUP_TIME (0.2) // [s], worst-case longest startup time.
-#define CUTOFF_Pr (1.02) // [-], maximum pressure ratio with no flow.
-#define KEEP_SIMMING_AFTER_COMBUSTION 0 // {0,1}, keeping simming when no comb.
+#define MAX_TIME (1000) // [s], fail if still simming after this long.
+
+#define NEGLIGIBLE_m (0.002) // [kg], assume nothing if <= this.
+#define STARTUP_t (0.2) // [s], worst-case longest startup time.
+#define CUTOFF_Pr (1.2) // [-], minimum injector pressure ratio for no back-flow.
+
+
+#if (defined(BR_DEBUG_GOTIME) && BR_DEBUG_GOTIME)
+  static i32 _debug_gotiming = 0;
+#endif
 
 
 
-// Sets the initial state of the system. Must have space in the time-dep buffers.
-local void initial_state(broState* s) {
-    assertx(s->count >= 1, "count=%d", s->count);
-
-    // Calculate initial state.
-
-    // Assuming ox tank at ambient temperature and a saturated mixture.
-    f64 T0_t = s->T_a;
-    f64 V0_l = s->V_t * s->vff0_o;
-    f64 V0_v = s->V_t - V0_l;
-    f64 m0_l = V0_l * N2O_rho_satliq(T0_t);
-    f64 m0_v = V0_v * N2O_rho_satvap(T0_t);
-
-    // Fuel inner diameter explicit param.
-    f64 D0_f = s->D0_f;
-
-    // Combustion chamber initially filled with ambient properties.
-    f64 V0_c = s->Vempty_c - tube_vol(s->L_f, D0_f, s->D_c);
-    f64 m0_g = s->rho_a * V0_c;
-    f64 nmol0_g = m0_g / s->Mw_a;
-    f64 T0_g = s->T_a;
-    f64 Cp0_g = m0_g * s->cp_a;
-
-    // Chuck into the state.
-    s->t[0] = 0.0;
-    s->T_t[0] = T0_t;
-    s->m_l[0] = m0_l;
-    s->m_v[0] = m0_v;
-    s->D_f[0] = D0_f;
-    s->m_g[0] = m0_g;
-    s->nmol_g[0] = nmol0_g;
-    s->T_g[0] = T0_g;
-    s->Cp_g[0] = Cp0_g;
-    s->upto = 1;
+local i32 sim_has_optionals(broState* s) {
+    return (s->count > 0);
+}
+typedef struct Optionals {
+    f64 t;
+    f64 alt_r;
+    f64 vel_r;
+    f64 acc_r;
+    f64 m_r;
+    f64 com_r;
+    f64 T_t;
+    f64 T_g;
+    f64 P_t;
+    f64 P_c;
+    f64 P_a;
+    f64 m_l;
+    f64 m_v;
+    f64 m_f;
+    f64 dm_inj;
+    f64 dm_reg;
+    f64 dm_out;
+    f64 m_g;
+    f64 cp_g;
+    f64 cv_g;
+    f64 y_g;
+    f64 ofr;
+    f64 Fthrust;
+    f64 Fdrag;
+    f64 Fgravity;
+} Optionals;
+local void sim_set_optionals(broState* s, Optionals* opt) {
+    assert(sim_has_optionals(s));
+    assertx(s->upto >= 0, "upto=%d, count=%d", s->upto, s->count);
+    assertx(s->upto < s->count, "upto=%d, count=%d", s->upto, s->count);
+    if (s->out_t)        s->out_t[s->upto]        = opt->t;
+    if (s->out_alt_r)    s->out_alt_r[s->upto]    = opt->alt_r;
+    if (s->out_vel_r)    s->out_vel_r[s->upto]    = opt->vel_r;
+    if (s->out_acc_r)    s->out_acc_r[s->upto]    = opt->acc_r;
+    if (s->out_m_r)      s->out_m_r[s->upto]      = opt->m_r;
+    if (s->out_com_r)    s->out_com_r[s->upto]    = opt->com_r;
+    if (s->out_T_t)      s->out_T_t[s->upto]      = opt->T_t;
+    if (s->out_T_g)      s->out_T_g[s->upto]      = opt->T_g;
+    if (s->out_P_t)      s->out_P_t[s->upto]      = opt->P_t;
+    if (s->out_P_c)      s->out_P_c[s->upto]      = opt->P_c;
+    if (s->out_P_a)      s->out_P_a[s->upto]      = opt->P_a;
+    if (s->out_m_l)      s->out_m_l[s->upto]      = opt->m_l;
+    if (s->out_m_v)      s->out_m_v[s->upto]      = opt->m_v;
+    if (s->out_m_f)      s->out_m_f[s->upto]      = opt->m_f;
+    if (s->out_dm_inj)   s->out_dm_inj[s->upto]   = opt->dm_inj;
+    if (s->out_dm_reg)   s->out_dm_reg[s->upto]   = opt->dm_reg;
+    if (s->out_dm_out)   s->out_dm_out[s->upto]   = opt->dm_out;
+    if (s->out_m_g)      s->out_m_g[s->upto]      = opt->m_g;
+    if (s->out_cp_g)     s->out_cp_g[s->upto]     = opt->cp_g;
+    if (s->out_cv_g)     s->out_cv_g[s->upto]     = opt->cv_g;
+    if (s->out_y_g)      s->out_y_g[s->upto]      = opt->y_g;
+    if (s->out_ofr)      s->out_ofr[s->upto]      = opt->ofr;
+    if (s->out_Fthrust)  s->out_Fthrust[s->upto]  = opt->Fthrust;
+    if (s->out_Fdrag)    s->out_Fdrag[s->upto]    = opt->Fdrag;
+    if (s->out_Fgravity) s->out_Fgravity[s->upto] = opt->Fgravity;
+    ++s->upto;
 }
 
 
 
-// Performs some discrete integrations of the system differential. Must have
-// some elements set in the time-dep buffers. Returns non-zero if the sim is
+
+// Sets the initial state of the system.
+local void sim_initial(broState* s) {
+
+    // Using rule-of-thumb pre- and post-cc lengths:
+    f64 cc_pre_length = s->D_c;
+    f64 cc_post_length = 1.5 * s->D_c;
+    s->L_c = cc_pre_length + s->L_f + cc_post_length;
+
+    // Determine tank specs by assuming the largest pressure it needs to handle
+    // is the N2O critical pressure.
+    Pipe tank_wall = { .L=s->L_tw, .ID=UNSET, .OD=s->D_r };
+    pipe_set_th_for_P(&tank_wall, s->Ys_tw, N2O_Pcrit, s->sf_tw);
+    // TODO: establish exact tank mass, for now just assume thick ends.
+    Pipe tank_wall_end = { .L=2*pipe_th(&tank_wall), .ID=0, .OD=s->D_r };
+    Pipe tank = { .L=s->L_tw, .ID=0.0, .OD=tank_wall.ID };
+    Pipe cc = { .L=s->L_c, .ID=0.0, .OD=s->D_c };
+    Pipe fuel0 = { .L=s->L_f, .ID=UNSET, .OD=s->D_c };
+    pipe_set_th(&fuel0, s->th0_f);
+
+    s->V_t = pipe_V(&tank);
+    s->m_tw = s->rho_tw * pipe_V(&tank_wall)
+            + 2 * s->rho_tw * pipe_V(&tank_wall_end);
+    s->C_tw = s->m_tw * s->c_tw;
+
+    s->Vempty_c = pipe_V(&cc);
+
+    // Fully specing the cc walls requires knowing the max pressure, which we
+    // wont until we sim the combustion so initially we just use a ballpark
+    // thickness and once we know Now do cc walls for cc max pressure.
+    Pipe cc_wall = { .L=s->L_c, .ID=s->D_c, .OD=UNSET };
+    f64 ballpack_P_c = 3e6; // =3MPa
+    pipe_set_th_for_P(&cc_wall, s->Ys_cw, ballpack_P_c, s->sf_cw);
+    s->th_cw = UNSET; // flag that walls still need to be speced.
+    s->m_cw = s->rho_cw * pipe_V(&cc_wall);
+
+    // TODO: nozzle specs
+    s->L_nzl = 0.10;
+    s->m_nzl = 2;
+
+
+    // Setup the running variables with their initial values.
+
+    // Already ignited.
+    s->onfire = 1;
+
+    // Start at the start.
+    s->t = 0.0;
+
+    // Assuming ox tank at ambient temperature and a saturated mixture.
+    s->T_t = s->T_a;
+    f64 V0_l = s->V_t * s->vff0_l;
+    f64 V0_v = s->V_t - V0_l;
+    s->m_l = V0_l * N2O_rho_satliq(s->T_t);
+    s->m_v = V0_v * N2O_rho_satvap(s->T_t);
+
+    s->ID_f = fuel0.ID;
+
+    // Combustion chamber initially filled with ambient properties.
+    f64 V0_c = s->Vempty_c - tube_vol(s->L_f, s->ID_f, s->D_c);
+    //  P*V = m*R*T  [ideal gas law]
+    // => m = P*V / (R*T)
+    s->m_g = amb_P(s->alt0_r) * V0_c / AMB_R / s->T_a;
+    s->N_g = s->m_g / AMB_Mw;
+    s->T_g = s->T_a;
+    s->Cp_g = s->m_g * AMB_STANDARD_CONDITIONS_cp;
+    //  cp - cv = R  [ideal gas law]
+    // => cv = cp - R
+    s->Cv_g = s->m_g * (AMB_STANDARD_CONDITIONS_cp - AMB_R);
+
+    // Initially at rest at the given altitude.
+    s->alt_r = s->alt0_r;
+    s->vel_r = 0.0;
+
+    // Setup all the initial optional outputs.
+    if (sim_has_optionals(s)) {
+        // Same deduction logic as the genuine sims.
+
+        f64 t     = s->t;
+        f64 T_t   = s->T_t;
+        f64 m_l   = s->m_l;
+        f64 m_v   = s->m_v;
+        f64 ID_f  = s->ID_f;
+        f64 m_g   = s->m_g;
+        f64 N_g   = s->N_g;
+        f64 T_g   = s->T_g;
+        f64 Cp_g  = s->Cp_g;
+        f64 Cv_g  = s->Cv_g;
+        f64 alt_r = s->alt_r;
+        f64 vel_r = s->vel_r;
+
+        f64 P_t;
+        if (m_l > NEGLIGIBLE_m) {
+            P_t = N2O_Psat(T_t);
+        } else {
+            f64 rho_v = m_v / s->V_t;
+            f64 rhosat_v = N2O_rho_satvap(T_t);
+            if (rho_v > rhosat_v)
+                rho_v = rhosat_v;
+            P_t = N2O_P(T_t, rho_v);
+        }
+
+        f64 P_a = amb_P(s->alt_r);
+
+        f64 V_f = tube_vol(s->L_f, ID_f, s->D_c);
+        f64 V_c = s->Vempty_c - V_f;
+        f64 m_f = PARAFFIN_rho * V_f;
+
+        f64 y_g = Cp_g / Cv_g;
+        f64 cp_g = Cp_g / m_g;
+        f64 cv_g = Cv_g / m_g;
+        f64 Mw_g = m_g / N_g;
+        f64 R_g = GAS_CONSTANT / Mw_g;
+        f64 P_c = m_g * R_g * T_g / V_c;
+
+        f64 m_r = s->m_locked
+                + s->m_tw + m_l + m_v
+                + s->m_inj
+                + s->m_mov
+                + s->m_cw + m_f
+                + s->m_nzl;
+
+        // All derivatives are zero initially.
+        f64 acc_r = 0.0;
+        f64 dm_inj = 0.0;
+        f64 dm_reg = 0.0;
+        f64 dm_out = 0.0;
+        f64 ofr = 0.0;
+        f64 Fthrust = 0.0;
+        f64 Fdrag = 0.0;
+        f64 Fgravity = 0.0;
+
+        sim_set_optionals(s, &(Optionals){
+            .t=t,
+            .alt_r=alt_r,
+            .vel_r=vel_r,
+            .acc_r=acc_r,
+            .m_r=m_r,
+            .com_r=UNSET, // TODO: com.
+            .T_t=T_t,
+            .T_g=T_g,
+            .P_t=P_t,
+            .P_c=P_c,
+            .P_a=P_a,
+            .m_l=m_l,
+            .m_v=m_v,
+            .m_f=m_f,
+            .dm_inj=dm_inj,
+            .dm_reg=dm_reg,
+            .dm_out=dm_out,
+            .m_g=m_g,
+            .cp_g=cp_g,
+            .cv_g=cv_g,
+            .y_g=y_g,
+            .ofr=ofr,
+            .Fthrust=Fthrust,
+            .Fdrag=Fdrag,
+            .Fgravity=Fgravity,
+        });
+    }
+}
+
+
+
+// Simulates the entire rocket. stepping all running vars of the system,
+// producing all optional output and returning non-zero if the simulation is
 // complete and should stop.
-local i32 step_state(broState* s) {
-    assertx(s->upto >= 0, "upto=%d", s->upto);
-    if (s->upto >= s->count) // dont buffer overflow.
-        return 1;
+local i32 sim_ulate(broState* s) {
+    assert(s->t < MAX_TIME);
 
     // Current state variables.
-    f64 T_t = s->T_t[s->upto - 1];
-    f64 m_l = s->m_l[s->upto - 1];
-    f64 m_v = s->m_v[s->upto - 1];
-    f64 D_f = s->D_f[s->upto - 1];
-    f64 m_g = s->m_g[s->upto - 1];
-    f64 nmol_g = s->nmol_g[s->upto - 1];
-    f64 T_g = s->T_g[s->upto - 1];
-    f64 Cp_g = s->Cp_g[s->upto - 1];
+    i32 onfire = s->onfire;
+    f64 T_t   = s->T_t;
+    f64 m_l   = s->m_l;
+    f64 m_v   = s->m_v;
+    f64 ID_f  = s->ID_f;
+    f64 m_g   = s->m_g;
+    f64 N_g   = s->N_g;
+    f64 T_g   = s->T_g;
+    f64 Cp_g  = s->Cp_g;
+    f64 Cv_g  = s->Cv_g;
+    f64 alt_r = s->alt_r;
+    f64 vel_r = s->vel_r;
+
+    // Ambient pressure changes with altitude.
+    f64 P_a = amb_P(alt_r);
 
     // Reconstruct some cc/fuel state.
-    f64 V_f = tube_vol(s->L_f, D_f, s->D_c);
-    f64 A_f = cyl_area(s->L_f, D_f); // inner fuel grain surface area.
+    f64 V_f = tube_vol(s->L_f, ID_f, s->D_c);
+    f64 A_f = cyl_area(s->L_f, ID_f); // inner fuel grain surface area.
     f64 V_c = s->Vempty_c - V_f;
     f64 m_f = PARAFFIN_rho * V_f;
 
     // Reconstruct some cc gas state.
+    f64 y_g = Cp_g / Cv_g;
     f64 cp_g = Cp_g / m_g;
-    f64 Mw_g = m_g / nmol_g;
+    f64 cv_g = Cv_g / m_g;
+    f64 Mw_g = m_g / N_g;
     f64 R_g = GAS_CONSTANT / Mw_g;
-    f64 y_g = cp_g / (cp_g - R_g);
-    f64 rho_g = m_g / V_c;
 
     // Assuming combustion gases are ideal:
     //  P*V = m*R*T
-    //  P = R*T * m/V
-    f64 P_c = R_g * T_g * rho_g;
+    //  P = m*R*T/V
+    f64 P_c = m_g * R_g * T_g / V_c;
+    // Note this is assuming an iso-thermal expansion of the cc gases into the
+    // space left by the fuel grain eroding. While ideally we might assume
+    // adiabatic the difference would be absolutely tiny.
 
 
-    // Properties determined by injector flow:
+    // Once the motor burn has started and we have a stable pressure, we assume
+    // this is the highest pressure the cc will experience and can now properly
+    // spec the walls for this pressure. Note that this does mean a tiny bit of
+    // the trajectory is done using the wrong mass, but thats so fine.
+    if ((s->t > STARTUP_t) && !ISSET(s->th_cw)) {
+        Pipe cc_wall = { .L=s->L_c, .ID=s->D_c, .OD=UNSET };
+        pipe_set_th_for_P(&cc_wall, s->Ys_tw, P_c, 3.0);
+        s->th_cw = pipe_th(&cc_wall);
+        s->m_cw = s->rho_cw * pipe_V(&cc_wall);
+    }
+
+
+
+    // Properties determined around injector:
+    f64 P_t;
     f64 dm_l;
     f64 dm_v;
     f64 dm_inj;
     f64 dT_t;
 
     // Liquid draining while there's any liquid in the tank.
-    if (m_l > NEGLIGIBLE_MASS) {
+    if (m_l > NEGLIGIBLE_m) {
+        P_t = N2O_Psat(T_t); // tank at saturated pressure.
+
 
         // Find injector flow rate.
 
-        f64 P_u = N2O_Psat(T_t); // tank at saturated pressure.
+        f64 P_u = P_t;
         f64 P_d = P_c;
+        // Just pretend pressure isn't below our low bound if it is. Note that
+        // this is very unlikely (impossible?) to happen during liquid draining.
+        if (P_d < N2O_Pmin)
+            P_d = N2O_Pmin;
 
-        if (P_u <= CUTOFF_Pr * P_d)
+        // Need a pressure drop across injector if we still burning.
+        assertx(!onfire || (P_u > CUTOFF_Pr * P_d), "P_u=%fPa, P_d=%fPa", P_u,
+                P_d);
+        // Dont model flow back into tank.
+        if (P_u < P_d)
             goto NO_INJECTOR_FLOW;
-            // id love to see python try to handle a goto.
 
         // Single-phase incompressible model (with Beta = 0):
         // (assuming upstream density as the "incompressible" density)
         f64 rho_u = N2O_rho_satliq(T_t);
-        f64 mdot_SPI = s->Cd_inj * s->A_inj * br_sqrt(2 * rho_u * (P_u - P_d));
+        f64 dm_SPI = s->Cd_inj * s->A_inj * br_sqrt(2 * rho_u * (P_u - P_d));
 
         // Homogenous equilibrium model:
         // (assuming only saturated liquid leaving from upstream)
@@ -940,7 +1438,7 @@ local i32 step_state(broState* s) {
         f64 v_d_v = 1 / rho_d_v;
         f64 v_d = (1 - x_d) * v_d_l + x_d * v_d_v;
         f64 rho_d = 1 / v_d;
-        f64 mdot_HEM = s->Cd_inj * s->A_inj * rho_d * br_sqrt(2 * (h_u - h_d));
+        f64 dm_HEM = s->Cd_inj * s->A_inj * rho_d * br_sqrt(2 * (h_u - h_d));
 
         // Generalised non-homogenous non-equilibrium model:
         // (assuming that P_sat is upstream saturation, and so is alaways
@@ -953,11 +1451,11 @@ local i32 step_state(broState* s) {
         //  kappa = sqrt(1) = 1
         f64 kappa = 1;
         f64 k_NHNE = 1 / (1 + kappa);
-        dm_inj = mdot_SPI * (1 - k_NHNE) + mdot_HEM * k_NHNE;
+        dm_inj = dm_SPI * (1 - k_NHNE) + dm_HEM * k_NHNE;
 
 
-        // To determine temperature and vapourised mass derivatives,
-        // we're going to have to use: our brain.
+        // To determine temperature and vapourised mass derivatives, we're going
+        // to have to use: our brain.
         //  V = const.
         //  m_l / rho_l + m_v / rho_v = const.
         //  d/dt (m_l / rho_l + m_v / rho_v) = 0
@@ -996,20 +1494,20 @@ local i32 step_state(broState* s) {
         //  dm_v = foo + dT * bar
         // So, dm_v depends on dT, but also vice versa:
         //  d/dt (U) = -dm_inj * h_l  [first law of thermodynamics, adiabatic]
-        //  d/dt (U_w + U_l + U_v) = -dm_inj * h_l
-        //  d/dt (m_w*u_w) + d/dt (m_l*u_l) + d/dt (m_v*u_v) = -dm_inj * h_l
-        //  -dm_inj * h_l = dm_w*u_w + m_w*du_w
+        //  d/dt (U_tw + U_l + U_v) = -dm_inj * h_l
+        //  d/dt (m_tw*u_tw) + d/dt (m_l*u_l) + d/dt (m_v*u_v) = -dm_inj * h_l
+        //  -dm_inj * h_l = dm_tw*u_tw + m_tw*du_tw
         //                + dm_l*u_l + m_l*du_l
         //                + dm_v*u_v + m_v*du_v
-        // dm_w = 0  [wall aint going anywhere]
+        // dm_tw = 0  [wall aint going anywhere]
         // dm_l = -dm_v - dm_inj  [same as earlier]
-        //  -dm_inj * h_l = m_w*du_w + m_l*du_l + m_v*du_v
+        //  -dm_inj * h_l = m_tw*du_tw + m_l*du_l + m_v*du_v
         //                + (-dm_v - dm_inj) * u_l
         //                + dm_v*u_v
-        //  dm_inj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
+        //  dm_inj * (u_l - h_l) = m_tw*du_tw + m_l*du_l + m_v*du_v
         //                       - dm_v*u_l
         //                       + dm_v*u_v
-        //  dm_inj * (u_l - h_l) = m_w*du_w + m_l*du_l + m_v*du_v
+        //  dm_inj * (u_l - h_l) = m_tw*du_tw + m_l*du_l + m_v*du_v
         //                       + dm_v * (u_v - u_l)
         // du = d/dt (u) = d/dT (u) * dT/dt
         // also note:
@@ -1017,9 +1515,9 @@ local i32 step_state(broState* s) {
         //   d/dT (u) = cv
         // therefore:
         //   du = dT * cv
-        //  dm_inj * (u_l - h_l) = dT * (m_w*cv_w + m_l*cv_l + m_v*cv_v)
+        //  dm_inj * (u_l - h_l) = dT * (m_tw*cv_tw + m_l*cv_l + m_v*cv_v)
         //                       + dm_v * (u_v - u_l)
-        // let: Cv = m_w*cv_w + m_l*cv_l + m_v*cv_v
+        // let: Cv = m_tw*cv_tw + m_l*cv_l + m_v*cv_v
         //  dm_inj * (u_l - h_l) = dT * Cv + dm_v * (u_v - u_l)
         //  dT * Cv = dm_inj * (u_l - h_l) + dm_v * (u_l - u_v)
         // i think conceptually this makes sense as:
@@ -1039,7 +1537,7 @@ local i32 step_state(broState* s) {
 
         f64 Cv_l = m_l * N2O_cv_satliq(T_t);
         f64 Cv_v = m_v * N2O_cv_satvap(T_t);
-        f64 Cv = Cv_l + Cv_v + s->C_w;
+        f64 Cv = Cv_l + Cv_v + s->C_tw;
 
         f64 h_l = N2O_h_satliq(T_t);
         f64 u_l = N2O_u_satliq(T_t);
@@ -1047,8 +1545,7 @@ local i32 step_state(broState* s) {
 
         f64 foo = dm_inj / rho_l / (1/rho_v - 1/rho_l);
         f64 bar = (m_l * drhodT_l / (rho_l*rho_l)
-                 + m_v * drhodT_v / (rho_v*rho_v))
-                / (1/rho_v - 1/rho_l);
+                 + m_v * drhodT_v / (rho_v*rho_v)) / (1/rho_v - 1/rho_l);
 
         dT_t = (dm_inj * (u_l - h_l) + foo * (u_l - u_v))
              / (Cv - bar * (u_l - u_v));
@@ -1058,26 +1555,40 @@ local i32 step_state(broState* s) {
 
 
     // Otherwise vapour draining.
-    } else if (m_v > NEGLIGIBLE_MASS) {
+    } else if (m_v > NEGLIGIBLE_m) {
         dm_l = 0.0; // liquid mass is ignored hence fourth (big word init).
 
-        // During this period, temperature and density are used to fully
-        // define the state (density is simple due to fixed volume).
+        // During this period, temperature and density are used to fully define
+        // the state (due to fixed volume).
         f64 rho_v = m_v / s->V_t;
 
-        // Due to numerical inaccuracy, might technically have the properties
-        // of a saturated mixture so just pretend its a saturated vapour.
+        // Due to numerical inaccuracy, might technically have the properties of
+        // a saturated mixture so just pretend its a saturated vapour.
         f64 rhosat_v = N2O_rho_satvap(T_t);
-        if (rho_v >= rhosat_v)
+        if (rho_v > rhosat_v)
             rho_v = rhosat_v;
+        // TODO: dont fully sim tank after burn, just extrapolate. for now just
+        // clamp properties to be in range for our approximations.
+        if (rho_v < N2O_rhomin)
+            rho_v = N2O_rhomin;
+
+        P_t = N2O_P(T_t, rho_v);
+        if (P_t < N2O_Pmin)
+            P_t = N2O_Pmin;
 
 
         // Find injector flow rate.
 
-        f64 P_u = N2O_P(T_t, rho_v);
+        f64 P_u = P_t;
         f64 P_d = P_c;
+        if (P_d < N2O_Pmin) // same reasoning as with liquid draining.
+            P_d = N2O_Pmin;
 
-        if (P_u <= CUTOFF_Pr * P_d)
+        // Need a pressure drop across injector if we still burning.
+        assertx(!onfire || (P_u > CUTOFF_Pr * P_d), "P_u=%fPa, P_d=%fPa", P_u,
+                P_d);
+        // Dont model flow back into tank.
+        if (P_u < P_d)
             goto NO_INJECTOR_FLOW;
 
         // Technically gamma but use 'y' for file size reduction.
@@ -1085,8 +1596,8 @@ local i32 step_state(broState* s) {
         // Use compressibility factor to account for non-ideal gas.
         f64 Z_u = N2O_Z(T_t, rho_v);
 
-        // Real compressible flow through an injector, with both
-        // choked and unchoked possibilities:
+        // Real compressible flow through an injector, with both choked and
+        // unchoked possibilities:
         f64 Pr_crit = br_pow(2 / (y_u + 1), y_u / (y_u - 1));
         f64 Pr_rec = P_d / P_u;
         f64 Pterm;
@@ -1105,27 +1616,27 @@ local i32 step_state(broState* s) {
         // Back to the well.
         //  d/dt (U) = -dm_inj * h  [first law of thermodynamics, adiabatic]
         // using no suffix is the non-saturated vapour in the tank:
-        //  d/dt (U_w + U) = -dm_inj * h
-        //  d/dt (m_w*u_w) + d/dt (m*u) = -dm_inj * h
-        //  -dm_inj * h = dm_w*u_w + m_w*du_w
+        //  d/dt (U_tw + U) = -dm_inj * h
+        //  d/dt (m_tw*u_tw) + d/dt (m*u) = -dm_inj * h
+        //  -dm_inj * h = dm_tw*u_tw + m_tw*du_tw
         //              + dm*u + m*du
-        // dm_w = 0  [wall aint going anywhere]
+        // dm_tw = 0  [wall aint going anywhere]
         // dm = -dm_inj  [only mass change is from injector]
-        //  -dm_inj * h = m_w * du_w
+        //  -dm_inj * h = m_tw * du_tw
         //              - dm_inj * u
         //              + m * du
-        //  dm_inj * (u - h) = m_w * du_w + m * du
+        //  dm_inj * (u - h) = m_tw * du_tw + m * du
         // du = dT * cv  [previously derived]
-        //  dm_inj * (u - h) = dT * (m_w * cv_w + m * cv)
-        // let: Cv = m_w * cv_w + m * cv
+        //  dm_inj * (u - h) = dT * (m_tw * cv_tw + m * cv)
+        // let: Cv = m_tw * cv_tw + m * cv
         //  dm_inj * (u - h) = dT * Cv
         // => dT = dm_inj * (u - h) / Cv
-        // which makes sense, since only energy change is due to lost flow work.
+        // which makes sense, since only energy change is due to boundary work.
 
         f64 u_u = N2O_u(T_t, rho_v);
         f64 h_u = N2O_h(T_t, rho_v);
 
-        f64 Cv = s->C_w + m_v * N2O_cv(T_t, P_u);
+        f64 Cv = s->C_tw + m_v * N2O_cv(T_t, P_u);
 
         dT_t = dm_inj * (u_u - h_u) / Cv;
 
@@ -1133,6 +1644,7 @@ local i32 step_state(broState* s) {
     // No oxidiser left.
     } else {
       NO_INJECTOR_FLOW:;
+        P_t = 0.0;
         dm_l = 0.0;
         dm_v = 0.0;
         dm_inj = 0.0;
@@ -1140,42 +1652,93 @@ local i32 step_state(broState* s) {
     }
 
 
+
     // Do fuel regression.
-    f64 dD_f;
-    f64 dV_f;
+    f64 dID_f;
     f64 dm_reg;
-    // Gotta be fuel left.
-    if (m_f > NEGLIGIBLE_MASS) {
+    // Gotta be fire and fuel left to regress.
+    if (onfire && m_f > NEGLIGIBLE_m) {
 
         // Get oxidiser mass flux through the fuel grain.
-        f64 Gox = dm_inj / circ_area(D_f);
-        // Find regression rate from empirical parameters (and ox mass flux).
-        f64 rr_rdot = RR_a0 * br_pow(Gox, RR_n);
+        f64 G_o = dm_inj / circ_area(ID_f);
+        // Use empircally determined regression rate.
+        f64 rr_rdot = regression_rate_rdot(G_o);
 
         // Fuel mass and diameter change from rdot:
-        dD_f = 2 * rr_rdot;
-        dV_f = A_f * rr_rdot;
+        dID_f = 2 * rr_rdot;
+        f64 dV_f = A_f * rr_rdot;
         dm_reg = PARAFFIN_rho * dV_f;
 
-    // No fuel.
+    // No fuel left.
     } else {
-      #if !KEEP_SIMMING_AFTER_COMBUSTION
-        return 1; // stop sim.
-      #endif
-
-        dD_f = 0.0;
-        dV_f = 0.0;
+        dID_f = 0.0;
         dm_reg = 0.0;
+    }
+
+
+    // Instantaneous oxidiser-fuel ratio.
+    f64 ofr = (dm_reg != 0) ? (dm_inj / dm_reg) : 0.0;
+
+    // Change in cc gas properties due to added gas.
+    f64 dm_n = dm_inj + dm_reg; // new gas masses from ox+fuel.
+    f64 T_n;
+    f64 Mw_n;
+    f64 cp_n;
+    f64 cv_n;
+
+    // If ofr too low, (our cea approxes dont work) BUT MORE IMPORTANTLY
+    // combustion would probably stop.
+    if (onfire && ofr >= CEA_ofrmin) {
+        // If pressure is too low for our cea approxes, just pretend its not
+        // lmao.
+        f64 P = P_c;
+        if (P < CEA_Pmin)
+            P = CEA_Pmin;
+
+        // Do cea to find combustion properties.
+        T_n = cea_T_c(P, ofr);
+        Mw_n = cea_Mw_c(P, ofr);
+        cp_n = cea_cp_c(P, ofr);
+        cv_n = cp_n / cea_y_throat(P, ofr);
+
+    } else {
+        // Combustion stops (or had already stopped).
+        onfire = 0;
+
+        // TODO: dont sim cc gases after combustion stops. the only reason we do
+        //       it now is because we want to still model the oxidiser mass
+        //       leaving (since it affects the trajectory, maybe noticably) but
+        //       we'll find an approximation to model that without needing the
+        //       rest.
+
+
+        // Oxidiser flowing into cc. Note that for one step, unburnt fuel might
+        // also be flowing in (and we arent accounting for its properties), but
+        // after that regression stops bc no combustion so no big deal. Also note
+        // that we assume isothermal mass transfer, so using tank temperature but
+        // with current chamber pressure.
+        f64 T = T_t;
+        f64 P = P_c;
+        // To not break our n2o prop functions, we assume constant props at
+        // temperatues and pressures below the lower bound.
+        if (P < N2O_Pmin)
+            P = N2O_Pmin;
+        if (T < N2O_Tmin)
+            T = N2O_Tmin;
+        T_n = T_t;
+        Mw_n = N2O_Mw;
+        cp_n = N2O_cp(T, P);
+        cv_n = N2O_cv(T, P);
     }
 
 
     // Do nozzle flow.
     f64 dm_out;
-    if (P_c > CUTOFF_Pr * s->P_a) {
-        // Model the nozzle as an injector, using ideal compressible
-        // flow and both choked and unchoked possibilities:
+    if (P_c > P_a) {
+        // Model the nozzle as an injector, using ideal compressible flow and
+        // both choked and unchoked possibilities:
         f64 Pr_crit = br_pow(2 / (y_g + 1), y_g / (y_g - 1));
-        f64 Pr_rec = s->P_a / P_c;
+        f64 Pr_rec = P_a / P_c;
         f64 Pterm;
         if (Pr_rec <= Pr_crit) { // choked.
             Pterm = br_pow(2 / (y_g + 1), (y_g + 1) / (y_g - 1));
@@ -1183,67 +1746,27 @@ local i32 step_state(broState* s) {
             Pterm = br_pow(Pr_rec, 2 / y_g) - br_pow(Pr_rec, (y_g + 1) / y_g);
             Pterm *= 2 / (y_g - 1);
         }
-        dm_out = s->Cd_nzl*s->A_nzl*P_c * br_sqrt(y_g / R_g / T_g * Pterm);
+        dm_out = s->Cd_nzl*s->A_throat*P_c * br_sqrt(y_g / R_g / T_g * Pterm);
     } else {
+        // grim.
         dm_out = 0.0;
     }
 
 
-    // Gases in the chamber is just entering - exiting.
+    // Gases accumulating in the chamber is just entering - exiting.
     f64 dm_g = dm_inj + dm_reg - dm_out;
 
-
-    // Change in cc gas properties due to added gas.
-    f64 T_n;
-    f64 Mw_n;
-    f64 cp_n;
-    f64 dm_n = dm_inj + dm_reg; // new gases is just ox+fuel.
-
-    // Combustion occurs if there is both oxidiser and fuel.
-    if (dm_inj != 0 && dm_reg != 0) {
-        // Instantaneous oxidiser-fuel ratio.
-        f64 ofr = dm_inj / dm_reg;
-
-        // If ofr too low, our cea approxes dont work and there would be very
-        // little comb anyway, so assume none.
-        if (ofr < 0.5)
-            // Note that we should account for the properties of the vapourised
-            // fuel also, but i cannor be bothered and its essentially irrelevant
-            // since no combustion is happening the results arent very impactful.
-            goto NO_COMBUSTION;
-
-        // Do cea to find combustion properties.
-        T_n = cea_T(P_c, ofr);
-        Mw_n = cea_Mw(P_c, ofr);
-        cp_n = cea_cp(P_c, ofr);
-    // Otherwise non-combusting oxidiser.
-    } else if (dm_inj != 0) {
-      NO_COMBUSTION:;
-
-        // No combustion but chamber gas changes due to oxidiser. Note this is
-        // assuming isothermal mass transfer, so using tank temperature but with
-        // current chamber pressure.
-        T_n = T_t;
-        Mw_n = N2O_Mw;
-        cp_n = N2O_cp(T_t, P_c);
-
-    } else {
-        // dm_n is 0 so any prop works.
-        T_n = 1.0;
-        Mw_n = 1.0;
-        cp_n = 1.0;
-    }
-
-    // Change in any mass-specific property for a reservoir with flow in and out:
+    // Change in any extensive property for a reservoir with flow in and out:
     //  d/dt (m*p) = dm_in * p_in - dm_out * p
 
     // Change in moles:
     //  dn = d/dt (n_n) - d/dt (n_out)
     //  dn = dm_n / Mw_n - dm_out / Mw
-    f64 dnmol_g = dm_n / Mw_n - dm_out / Mw_g;
+    f64 dN_g = dm_n / Mw_n - dm_out / Mw_g;
 
-    // Change in specific heat:
+    // Change in specific heats:
     f64 dCp_g = dm_n * cp_n - dm_out * cp_g;
+    f64 dCv_g = dm_n * cv_n - dm_out * cv_g;
 
     // Change in temperature:
     //  d/dt (m * cp * T) = dm_n * cp_n * T_n - dm_out * cp * T
@@ -1256,8 +1779,46 @@ local i32 step_state(broState* s) {
 
 
 
+    // Calculate thrust.
+    f64 Fthrust = 0.0;
+    if (onfire) {
+        // Same as earlier, just pretend pressure isnt that low if it is.
+        f64 P = P_c;
+        if (P < CEA_Pmin)
+            P = CEA_Pmin;
+        f64 Ivac = cea_Ivac(P, ofr, s->eps);
+        f64 A_exit = s->eps * s->A_throat;
+        Fthrust = dm_out * Ivac * STANDARD_GRAVITY - P_a * A_exit;
+        if (Fthrust < 0.0) // pretend it doesnt suck the rocket downwards.
+            Fthrust = 0.0;
+    }
+
+    // Calculate drag using the current mach number of the rocket and the drag
+    // coefficient calculated from that.
+    f64 mach_r = vel_r / amb_a(alt_r);
+    f64 CD_r = rocket_CD(mach_r);
+    f64 A_r = circ_area(s->D_r);
+    f64 Fdrag = -0.5 * amb_rho(alt_r) * vel_r*vel_r * CD_r * A_r;
+    // TODO: add fin drag
+
+    // Calculate weight force.
+    f64 m_r = s->m_locked
+            + s->m_tw + m_l + m_v
+            + s->m_inj
+            + s->m_mov
+            + s->m_cw + m_f
+            + s->m_nzl;
+    f64 Fgravity = -m_r * amb_g(alt_r);
+
+    // Calculate acceleration.
+    //  F = m*a  [a classic, newton i believe]
+    // => a = F/m
+    f64 dvel_r = (Fthrust + Fdrag + Fgravity) / m_r;
+
+
+
     // Now we have all state time-derivatives, we need to integrate. Note that
-    // different phases of the burn has very different stability. Generally,
+    // different phases of the burn have very different stability. Generally,
     // startup, shutdown, and liquid->vapour emptying are unstable and require
     // fine precision, otherwise we can safely take larger steps.
 
@@ -1265,22 +1826,32 @@ local i32 step_state(broState* s) {
     // not it), this system performs poorly under other methods since it is not
     // smooth. So, explicit euler it is. Also, we need the speed soooo.
 
-    #define STABLE_FLOW(m, dm) (                                        \
-            /* Nothing left or... */                                    \
-            ((m) <= NEGLIGIBLE_MASS && (dm) == 0.0) ||                  \
-            /* draining <5% each step and not close to cutoff. */       \
-            ((m) > 10*NEGLIGIBLE_MASS && br_fabs(20*Dt*(dm)) <= (m))    \
+    #define STABLE_FLOW(m, dm) (            \
+            /* not draining too quickly. */ \
+            (br_fabs(0.02*(dm)) <= (m))     \
         )
-    #define STABLE_FLOW_NEVER_NEGLIGIBLE(m, dm) (   \
-            /* just draining <5% each step. */      \
-            (br_fabs(20*Dt*(dm)) <= (m))            \
+    #define STABLE_FLOW_AND_EMPTY(m, dm) (                      \
+            /* Nothing left or... */                            \
+            (((m) <= NEGLIGIBLE_m) && ((dm) == 0.0)) ||         \
+            /* not close to cutoff and flowing stable-y. */     \
+            (((m) > 10*NEGLIGIBLE_m) && STABLE_FLOW((m), (dm))) \
         )
     i32 gotime = 1;
-    gotime &= (s->upto * Dt > STARTUP_TIME); // dont risk startup being gotimed.
-    gotime &= STABLE_FLOW(m_l, dm_l);
+    gotime &= (s->t > STARTUP_t); // dont risk startup being gotimed.
+    gotime &= STABLE_FLOW_AND_EMPTY(m_l, dm_l);
     gotime &= STABLE_FLOW(m_v, dm_v);
-    gotime &= STABLE_FLOW(m_f, -dm_reg);
-    gotime &= STABLE_FLOW_NEVER_NEGLIGIBLE(m_g, dm_g);
+    gotime &= STABLE_FLOW_AND_EMPTY(m_f, -dm_reg);
+    gotime &= STABLE_FLOW(m_g, dm_g);
+
+  #if (defined(BR_DEBUG_GOTIME) && BR_DEBUG_GOTIME)
+    if (gotime != _debug_gotiming) {
+        if (gotime)
+            printf("%6.3fs: ++ started gotiming\n", s->t);
+        else
+            printf("%6.3fs: -- stopped gotiming\n", s->t);
+        _debug_gotiming = gotime;
+    }
+  #endif
 
     i32 steps = 1;
     if (gotime) // GOTIME.
@@ -1288,35 +1859,65 @@ local i32 step_state(broState* s) {
 
     // Assume constant first derivative over all steps and perform forward euler
     // integration.
-    s->t[s->upto]      = s->t[s->upto - 1]      + steps * Dt;
-    s->T_t[s->upto]    = s->T_t[s->upto - 1]    + steps * Dt * dT_t;
-    s->m_l[s->upto]    = s->m_l[s->upto - 1]    + steps * Dt * dm_l;
-    s->m_v[s->upto]    = s->m_v[s->upto - 1]    + steps * Dt * dm_v;
-    s->D_f[s->upto]    = s->D_f[s->upto - 1]    + steps * Dt * dD_f;
-    s->m_g[s->upto]    = s->m_g[s->upto - 1]    + steps * Dt * dm_g;
-    s->nmol_g[s->upto] = s->nmol_g[s->upto - 1] + steps * Dt * dnmol_g;
-    s->T_g[s->upto]    = s->T_g[s->upto - 1]    + steps * Dt * dT_g;
-    s->Cp_g[s->upto]   = s->Cp_g[s->upto - 1]   + steps * Dt * dCp_g;
-    ++s->upto;
-    return 0;
+    s->onfire = onfire;
+    s->t     += steps * Dt;
+    s->T_t   += steps * Dt * dT_t;
+    s->m_l   += steps * Dt * dm_l;
+    s->m_v   += steps * Dt * dm_v;
+    s->ID_f  += steps * Dt * dID_f;
+    s->m_g   += steps * Dt * dm_g;
+    s->N_g   += steps * Dt * dN_g;
+    s->T_g   += steps * Dt * dT_g;
+    s->Cp_g  += steps * Dt * dCp_g;
+    s->Cv_g  += steps * Dt * dCv_g;
+    s->alt_r += steps * Dt * vel_r;
+    s->vel_r += steps * Dt * dvel_r;
+    // Send the optional outputs.
+    if (sim_has_optionals(s)) {
+        sim_set_optionals(s, &(Optionals){
+            .t=s->t,
+            .alt_r=alt_r,
+            .vel_r=vel_r,
+            .acc_r=dvel_r,
+            .m_r=m_r,
+            .com_r=UNSET, // TODO: com.
+            .T_t=T_t,
+            .T_g=T_g,
+            .P_t=P_t,
+            .P_c=P_c,
+            .P_a=P_a,
+            .m_l=m_l,
+            .m_v=m_v,
+            .m_f=m_f,
+            .dm_inj=dm_inj,
+            .dm_reg=dm_reg,
+            .dm_out=dm_out,
+            .m_g=m_g,
+            .cp_g=cp_g,
+            .cv_g=cv_g,
+            .y_g=y_g,
+            .ofr=ofr,
+            .Fthrust=Fthrust,
+            .Fdrag=Fdrag,
+            .Fgravity=Fgravity,
+        });
+    }
+
+    // Finished when we going downwards (and the initial bit is over, bc like we
+    // actually dip into the ground immediately before rocketing outta there).
+    return (s->t > STARTUP_t) && (s->vel_r <= 0.0);
 }
 
 
 
 // DLL-exposed function.
 void bro_sim(broState* s) {
-    // TODO: uh use them lmao.
-    (void)cea_Ivac;
-    (void)atmos_Pa;
-
     // Setup the assert macro to abort back to here, and just get outta here with
     // whatever data we gened.
     if (assertion_failed())
         return;
 
-    if (s->count < 1) // onto nothing.
-        return;
     // Integrate the system differential.
-    initial_state(s);
-    while (!step_state(s));
+    sim_initial(s);
+    while (!sim_ulate(s));
 }
