@@ -21,7 +21,7 @@ def main():
     s.locked_length = 1.0 # [m]
     s.locked_com = 1.3 # [m]
 
-    s.rocket_diameter = 0.145 # [m]
+    s.rocket_diameter = 145e-3 # [m]
 
     s.initial_altitude = 0.0 # [m]
 
@@ -54,7 +54,7 @@ def main():
 
     s.nozzle_discharge_coefficient = 0.8 # [-]
     s.exit_area_to_throat_area_ratio = 4.0 # [-] OUTPUT
-    s.throat_area = pi/4 * 25e-3**2 # [m^2] OUTPUT
+    s.throat_area = pi/4 * 30e-3**2 # [m^2] OUTPUT
 
     optimiser.cost(s)
 

@@ -1,6 +1,21 @@
 # man get me into c as quickly as possible.
 
 cdef extern from "sim.h":
+    cdef struct broRunning:
+        int onfire;
+        double t;
+        double T_t;
+        double m_l;
+        double m_v;
+        double ID_f;
+        double m_g;
+        double N_g;
+        double T_g;
+        double Cp_g;
+        double Cv_g;
+        double alt_r;
+        double vel_r;
+
     cdef struct broState:
         double target_apogee;
 
@@ -52,20 +67,7 @@ cdef extern from "sim.h":
         double L_nzl;
         double m_nzl;
 
-
-        int onfire;
-        double t;
-        double T_t;
-        double m_l;
-        double m_v;
-        double ID_f;
-        double m_g;
-        double N_g;
-        double T_g;
-        double Cp_g;
-        double Cv_g;
-        double alt_r;
-        double vel_r;
+        broRunning running;
 
         int upto;
         int count;
@@ -90,6 +92,7 @@ cdef extern from "sim.h":
         double* out_cp_g;
         double* out_cv_g;
         double* out_y_g;
+        double* out_R_g;
         double* out_ofr;
         double* out_Fthrust;
         double* out_Fdrag;
@@ -126,6 +129,7 @@ cdef class State:
                 np.ndarray[np.float64_t, mode="c"] cp_g=None,
                 np.ndarray[np.float64_t, mode="c"] cv_g=None,
                 np.ndarray[np.float64_t, mode="c"] y_g=None,
+                np.ndarray[np.float64_t, mode="c"] R_g=None,
                 np.ndarray[np.float64_t, mode="c"] ofr=None,
                 np.ndarray[np.float64_t, mode="c"] Fthrust=None,
                 np.ndarray[np.float64_t, mode="c"] Fdrag=None,
@@ -161,33 +165,40 @@ cdef class State:
                 double eps,
                 double A_throat,
             ):
-        self.obj.count = <int>min(
-                0 if t        is None else t.size,
-                0 if alt_r    is None else alt_r.size,
-                0 if vel_r    is None else vel_r.size,
-                0 if acc_r    is None else acc_r.size,
-                0 if m_r      is None else m_r.size,
-                0 if com_r    is None else com_r.size,
-                0 if T_t      is None else T_t.size,
-                0 if T_g      is None else T_g.size,
-                0 if P_t      is None else P_t.size,
-                0 if P_c      is None else P_c.size,
-                0 if P_a      is None else P_a.size,
-                0 if m_l      is None else m_l.size,
-                0 if m_v      is None else m_v.size,
-                0 if m_f      is None else m_f.size,
-                0 if dm_inj   is None else dm_inj.size,
-                0 if dm_reg   is None else dm_reg.size,
-                0 if dm_out   is None else dm_out.size,
-                0 if m_g      is None else m_g.size,
-                0 if cp_g     is None else cp_g.size,
-                0 if cv_g     is None else cv_g.size,
-                0 if y_g      is None else y_g.size,
-                0 if ofr      is None else ofr.size,
-                0 if Fthrust  is None else Fthrust.size,
-                0 if Fdrag    is None else Fdrag.size,
-                0 if Fgravity is None else Fgravity.size,
-            )
+        min_size = None
+        def new_min_size(x):
+            if x is None:
+                return min_size
+            return x.size if min_size is None else min(min_size, x.size)
+        min_size = new_min_size(t)
+        min_size = new_min_size(alt_r)
+        min_size = new_min_size(vel_r)
+        min_size = new_min_size(acc_r)
+        min_size = new_min_size(m_r)
+        min_size = new_min_size(com_r)
+        min_size = new_min_size(T_t)
+        min_size = new_min_size(T_g)
+        min_size = new_min_size(P_t)
+        min_size = new_min_size(P_c)
+        min_size = new_min_size(P_a)
+        min_size = new_min_size(m_l)
+        min_size = new_min_size(m_v)
+        min_size = new_min_size(m_f)
+        min_size = new_min_size(dm_inj)
+        min_size = new_min_size(dm_reg)
+        min_size = new_min_size(dm_out)
+        min_size = new_min_size(m_g)
+        min_size = new_min_size(cp_g)
+        min_size = new_min_size(cv_g)
+        min_size = new_min_size(y_g)
+        min_size = new_min_size(R_g)
+        min_size = new_min_size(ofr)
+        min_size = new_min_size(Fthrust)
+        min_size = new_min_size(Fdrag)
+        min_size = new_min_size(Fgravity)
+        if min_size is None:
+            min_size = 0
+        self.obj.count = <int>min_size
         self.obj.out_t        = NULL if t        is None else <double*>t.data
         self.obj.out_alt_r    = NULL if alt_r    is None else <double*>alt_r.data
         self.obj.out_vel_r    = NULL if vel_r    is None else <double*>vel_r.data
@@ -209,6 +220,7 @@ cdef class State:
         self.obj.out_cp_g     = NULL if cp_g     is None else <double*>cp_g.data
         self.obj.out_cv_g     = NULL if cv_g     is None else <double*>cv_g.data
         self.obj.out_y_g      = NULL if y_g      is None else <double*>y_g.data
+        self.obj.out_R_g      = NULL if R_g      is None else <double*>R_g.data
         self.obj.out_ofr      = NULL if ofr      is None else <double*>ofr.data
         self.obj.out_Fthrust  = NULL if Fthrust  is None else <double*>Fthrust.data
         self.obj.out_Fdrag    = NULL if Fdrag    is None else <double*>Fdrag.data

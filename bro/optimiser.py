@@ -258,6 +258,7 @@ def cost(s):
     cp_g     = np.empty(10_000_000, dtype=np.float64)
     cv_g     = np.empty(10_000_000, dtype=np.float64)
     y_g      = np.empty(10_000_000, dtype=np.float64)
+    R_g      = np.empty(10_000_000, dtype=np.float64)
     ofr      = np.empty(10_000_000, dtype=np.float64)
     Fthrust  = np.empty(10_000_000, dtype=np.float64)
     Fdrag    = np.empty(10_000_000, dtype=np.float64)
@@ -286,6 +287,7 @@ def cost(s):
         cp_g=cp_g,
         cv_g=cv_g,
         y_g=y_g,
+        R_g=R_g,
         ofr=ofr,
         Fthrust=Fthrust,
         Fdrag=Fdrag,
@@ -350,40 +352,44 @@ def cost(s):
     cp_g     = cp_g[:count]
     cv_g     = cv_g[:count]
     y_g      = y_g[:count]
+    R_g      = R_g[:count]
     ofr      = ofr[:count]
     Fthrust  = Fthrust[:count]
     Fdrag    = Fdrag[:count]
     Fgravity = Fgravity[:count]
 
-    plotme1 = [
-        # data, title, ylabel, y_lower_limit_as_zero
-        (alt_r*1e-3, "Altitude", "Altitude [km]", False),
-        (vel_r, "Velocity", "Speed [m/s]", False),
-        (Fthrust, "Thrust", "Force [N]", False),
-        (Fdrag, "Drag", "Force [N]", False),
-        (P_t, "Tank pressure", "Pressure [Pa]", False),
-        (P_c, "CC pressure", "Pressure [Pa]", False),
-        (T_t - 273.15, "Tank temperature", "Temperature [dC]", False),
-        (T_g - 273.15, "CC temperature", "Temperature [dC]", False),
-        (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
-        (dm_out, "Exhaust mass flow rate", "Mass flow rate [kg/s]", True),
-        (dm_inj, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
-        (dm_reg, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
-        (m_l + m_v, "Tank mass", "Mass [kg]", True),
-        (m_f, "Fuel mass", "Mass [kg]", True),
-    ]
-    plotme2 = [
-        # data, title, ylabel, y_lower_limit_as_zero
-        (acc_r, "Rocket acceleration", "Acceleration [m/s^2]", False),
-        (m_r, "Rocket mass", "Mass [kg]", False),
-        (P_a, "Atmospheric pressure", "Pressure [Pa]", False),
-        (Fgravity, "Gravity", "Force [N]", False),
-        (m_l, "Tank liquid mass", "Mass [kg]", False),
-        (m_v, "Tank vapour mass", "Mass [kg]", True),
-        (m_g, "CC gas mass", "Mass [kg]", False),
-        (cp_g, "CC gas cp", "Specific heat capacity [J/kg/K]", False),
-        (cv_g, "CC gas cv", "Specific heat capacity [J/kg/K]", False),
-        (y_g, "CC gas gamma", "Ratio [-]", True),
+    plotme = [
+        [
+            # data, title, ylabel, y_lower_limit_as_zero
+            (alt_r*1e-3, "Altitude", "Altitude [km]", False),
+            (vel_r, "Velocity", "Speed [m/s]", False),
+            (Fthrust, "Thrust", "Force [N]", False),
+            (Fdrag, "Drag", "Force [N]", False),
+            (P_t, "Tank pressure", "Pressure [Pa]", False),
+            (P_c, "CC pressure", "Pressure [Pa]", False),
+            (T_t - 273.15, "Tank temperature", "Temperature [dC]", False),
+            (T_g, "CC temperature", "Temperature [K]", False),
+            (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
+            (dm_out, "Exhaust mass flow rate", "Mass flow rate [kg/s]", True),
+            (dm_inj, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
+            (dm_reg, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
+            (m_l + m_v, "Tank mass", "Mass [kg]", True),
+            (m_f, "Fuel mass", "Mass [kg]", True),
+        ],
+        [
+            # data, title, ylabel, y_lower_limit_as_zero
+            (acc_r, "Rocket acceleration", "Acceleration [m/s^2]", False),
+            (m_r, "Rocket mass", "Mass [kg]", False),
+            (P_a, "Atmospheric pressure", "Pressure [Pa]", False),
+            (Fgravity, "Gravity", "Force [N]", False),
+            (m_l, "Tank liquid mass", "Mass [kg]", True),
+            (m_v, "Tank vapour mass", "Mass [kg]", True),
+            (m_g, "CC gas mass", "Mass [kg]", False),
+            (cp_g, "CC gas cp", "Specific heat capacity [J/kg/K]", False),
+            (cv_g, "CC gas cv", "Specific heat capacity [J/kg/K]", False),
+            (y_g, "CC gas gamma", "Ratio [-]", False),
+            (R_g, "CC gas R", "[J/kg/K]", False),
+        ],
     ]
     def doplot(plotme):
         if not plotme:
@@ -396,7 +402,7 @@ def cost(s):
                 continue
             y, title, ylabel, snapzero = elem
             plt.subplot(ynum, xnum, 1 + i // ynum + xnum * (i % ynum))
-            plt.plot(t[:len(y)], y, "-" + "o"*(len(y) == 1))
+            plt.plot(t, y, "-" + "o"*(len(y) == 1))
             plt.title(title)
             plt.xlabel("Time [s]")
             plt.ylabel(ylabel)
@@ -405,6 +411,6 @@ def cost(s):
                 _, ymax = plt.ylim()
                 plt.ylim(0, ymax)
         plt.subplots_adjust(left=0.05, right=0.97, wspace=0.4, hspace=0.3)
-    doplot(plotme1)
-    doplot(plotme2)
+    for plotmefr in plotme:
+        doplot(plotmefr)
     plt.show()

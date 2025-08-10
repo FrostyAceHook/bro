@@ -6,7 +6,8 @@
 //
 // X0 = initial value.
 // dX = time derivative.
-// DX = discrete change.
+// dXdY = derivative of X w.r.t Y.
+// DX = discrete change over time.
 //
 // X_r = rocket property.
 // X_a = ambient property.
@@ -24,8 +25,8 @@
 // X_l = liquid oxidiser property.
 // X_v = vapour oxidiser property.
 // X_o = general oxidiser property.
-// X_u = injector upstream property (tank-side).
-// X_d = injector downstream property (cc-side).
+// X_u = orifice upstream property.
+// X_d = orifice downstream property.
 // X_f = fuel property.
 // X_reg = fuel regression property.
 // X_g = cc gases property.
@@ -56,6 +57,7 @@
 // Ivac = specific impulse in vaccuum.
 // L = length.
 // m = mass.
+// mach = mach number (velocity as a multiple of the current speed of sound).
 // Mw = molar mass.
 // N = number of moles.
 // OD = outer diameter.
@@ -89,14 +91,29 @@
 // Z = compressibility factor.
 
 
+// Private types:
+typedef struct broRunning { // time-dependant constantly-updating parameters.
+    // NOTE: any changes to this struct must be mirrored in the cython bridging
+    //       struct.
+    int onfire;
+    double t;
+    double T_t;
+    double m_l;
+    double m_v;
+    double ID_f;
+    double m_g;
+    double N_g;
+    double T_g;
+    double Cp_g;
+    double Cv_g;
+    double alt_r;
+    double vel_r;
+} broRunning;
+
+
 // Public types:
 typedef double Input;   // independant input parameter
 typedef double Output;  // generated output parameter.
-
-// Private types:
-typedef double Running; // time-dependant constantly-updated parameter.
-typedef int RunningI;   // integer of that ^.
-
 
 typedef struct broState {
     // NOTE: any changes to this struct must be mirrored in the cython bridging
@@ -110,6 +127,7 @@ typedef struct broState {
 
     Input D_r;
     Input alt0_r;
+    Output A_r;
 
     Input T_a;
 
@@ -153,31 +171,19 @@ typedef struct broState {
     Output m_nzl;
 
 
-    RunningI onfire;
-    Running t;
-    Running T_t;
-    Running m_l;
-    Running m_v;
-    Running ID_f;
-    Running m_g;
-    Running N_g;
-    Running T_g;
-    Running Cp_g;
-    Running Cv_g;
-    Running alt_r;
-    Running vel_r;
+    broRunning running;
 
 
     // Optional output parameters:
     // These buffers must be supplied by the user, and each must be either null
     // or contain at-least `count` elements. If `count` is 0, all buffers are
-    // assumed to be null. `upto` contains the index of the next write into those
-    // categories buffers, aka the number of elements already written provided it
-    // was set to 0 before simming.
+    // assumed to be null. `upto` contains the index of the next write into the
+    // buffers, aka the number of elements already written provided it was set to
+    // 0 before simming.
 
-    int upto;  // input.
+    int upto; // input+output.
     int count; // input.
-    Output* out_t;
+    Output* out_t; // pointer=input, data=output.
     Output* out_alt_r;
     Output* out_vel_r;
     Output* out_acc_r;
@@ -198,6 +204,7 @@ typedef struct broState {
     Output* out_cp_g;
     Output* out_cv_g;
     Output* out_y_g;
+    Output* out_R_g;
     Output* out_ofr;
     Output* out_Fthrust;
     Output* out_Fdrag;

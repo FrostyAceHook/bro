@@ -7,6 +7,11 @@ if exist ".\build\" (
     rmdir /s /q ".\build"
 )
 
+if exist ".\bro\__pycache__\" (
+    echo Deleting directory: .\bro\__pycache__
+    rmdir /s /q ".\bro\__pycache__"
+)
+
 for %%F in (.\bro\sim.*) do (
     if exist "%%F" (
         set "FNAME=%%~NXF"
