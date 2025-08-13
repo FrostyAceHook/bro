@@ -183,32 +183,32 @@ typedef struct broState {
 
     int upto; // input+output.
     int count; // input.
-    Output* out_t; // pointer=input, data=output.
-    Output* out_alt_r;
-    Output* out_vel_r;
-    Output* out_acc_r;
-    Output* out_m_r;
-    Output* out_com_r;
-    Output* out_T_t;
-    Output* out_T_g;
-    Output* out_P_t;
-    Output* out_P_c;
-    Output* out_P_a;
-    Output* out_m_l; // always saturated.
-    Output* out_m_v; // only saturated if m_l > negligible.
-    Output* out_m_f;
-    Output* out_dm_inj; // oxidiser injector mass flow rate.
-    Output* out_dm_reg; // fuel regression mass flow rate.
-    Output* out_dm_out; // exhaust mass flow rate.
-    Output* out_m_g;
-    Output* out_cp_g;
-    Output* out_cv_g;
-    Output* out_y_g;
-    Output* out_R_g;
-    Output* out_ofr;
-    Output* out_Fthrust;
-    Output* out_Fdrag;
-    Output* out_Fgravity;
+    Output* restrict out_t; // pointer=input, data=output.
+    Output* restrict out_alt_r;
+    Output* restrict out_vel_r;
+    Output* restrict out_acc_r;
+    Output* restrict out_m_r;
+    Output* restrict out_com_r;
+    Output* restrict out_T_t;
+    Output* restrict out_T_g;
+    Output* restrict out_P_t;
+    Output* restrict out_P_c;
+    Output* restrict out_P_a;
+    Output* restrict out_m_l; // always saturated.
+    Output* restrict out_m_v; // only saturated if m_l > negligible.
+    Output* restrict out_m_f;
+    Output* restrict out_dm_inj; // oxidiser injector mass flow rate.
+    Output* restrict out_dm_reg; // fuel regression mass flow rate.
+    Output* restrict out_dm_out; // exhaust mass flow rate.
+    Output* restrict out_m_g;
+    Output* restrict out_cp_g;
+    Output* restrict out_cv_g;
+    Output* restrict out_y_g;
+    Output* restrict out_R_g;
+    Output* restrict out_ofr;
+    Output* restrict out_Fthrust;
+    Output* restrict out_Fdrag;
+    Output* restrict out_Fgravity;
 } broState;
 
 

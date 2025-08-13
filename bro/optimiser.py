@@ -358,9 +358,23 @@ def cost(s):
     Fdrag    = Fdrag[:count]
     Fgravity = Fgravity[:count]
 
+    finalme = {
+        "tank pressure": P_t,
+        "CC pressure": P_c,
+        "tank temperature": T_t,
+        "N2O liquid mass": m_l,
+        "N2O vapour mass": m_v,
+        "N2O mass": m_l + m_v,
+    }
+    if False:
+        for name, array in finalme.items():
+            s = f"Final {name} .."
+            s += "." * (25 - len(s))
+            print(f"{s} {array[-1]:,}")
+
     plotme = [
-        [
             # data, title, ylabel, y_lower_limit_as_zero
+        [
             (alt_r*1e-3, "Altitude", "Altitude [km]", False),
             (vel_r, "Velocity", "Speed [m/s]", False),
             (Fthrust, "Thrust", "Force [N]", False),
@@ -377,7 +391,6 @@ def cost(s):
             (m_f, "Fuel mass", "Mass [kg]", True),
         ],
         [
-            # data, title, ylabel, y_lower_limit_as_zero
             (acc_r, "Rocket acceleration", "Acceleration [m/s^2]", False),
             (m_r, "Rocket mass", "Mass [kg]", False),
             (P_a, "Atmospheric pressure", "Pressure [Pa]", False),
@@ -390,7 +403,16 @@ def cost(s):
             (y_g, "CC gas gamma", "Ratio [-]", False),
             (R_g, "CC gas R", "[J/kg/K]", False),
         ],
+        # [
+        #     (P_t, "Tank pressure", "Pressure [Pa]", False),
+        #     (P_c, "CC pressure", "Pressure [Pa]", False),
+        #     (T_t - 273.15, "Tank temperature", "Temperature [dC]", False),
+        #     (dm_inj, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
+        #     (m_l, "Tank liquid mass", "Mass [kg]", True),
+        #     (m_v, "Tank vapour mass", "Mass [kg]", True),
+        # ],
     ]
+
     def doplot(plotme):
         if not plotme:
             return
@@ -407,6 +429,7 @@ def cost(s):
             plt.xlabel("Time [s]")
             plt.ylabel(ylabel)
             plt.grid()
+            plt.xlim(0, t.max())
             if snapzero:
                 _, ymax = plt.ylim()
                 plt.ylim(0, ymax)

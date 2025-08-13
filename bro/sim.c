@@ -18,8 +18,12 @@ typedef unsigned long long  u64;  // 64-bit unsigned integer.
 typedef float   f32;  // 32-bit floating-point number (IEEE-754).
 typedef double  f64;  // 64-bit floating-point number (IEEE-754).
 
+// i literally just cant be bother to type it out.
+#define rstr restrict
+
 // Expands to the size of the given starray.
 #define countof(...) ((i32)(sizeof((__VA_ARGS__)) / sizeof(*(__VA_ARGS__))))
+
 
 
 #if (defined(BR_NO_ASSERTS) && BR_NO_ASSERTS)
@@ -55,6 +59,7 @@ static jmp_buf _assert_jump;
 #endif
 
 
+
 #if (defined(BR_HAVEALOOK) && BR_HAVEALOOK) && \
     (!defined(BR_DONTLOOK) || !BR_DONTLOOK)
   #define local __attribute((__used__)) static
@@ -82,7 +87,7 @@ static jmp_buf _assert_jump;
 // Expands to non-zero if `x` if in [`lo`, `hi`].
 #define br_within(x, lo, hi) ((lo) <= (x) && (x) <= (hi))
 // Expands to `x`, clamped to the nearest bound of [`lo`, `hi`] if out of bounds.
-#define br_clamp(x, lo, hi) (br_min(br_max((x), (lo)), (hi)))
+#define br_clamp(x, lo, hi) ((x) < (lo) ? (lo) : (x) > (hi) ? (hi) : (x))
 
 
 // Returns `2^exp`, requiring `exp` to be an integer.
@@ -1144,6 +1149,9 @@ local f64 hole_dm(const Hole* h) {
     f64 R = h->R;
     f64 T = h->T;
     f64 Z = h->Z;
+    // No upstream pressure no flow (and we dont do backflow).
+    if (P_u == 0.0)
+        return 0.0;
     f64 Pr = P_d / P_u;
     // If downstream has a larger pressure than upstream, we assume no flow. If
     // back-flow would be a problem, it must be handled by the caller.
@@ -1166,8 +1174,9 @@ local f64 hole_dm(const Hole* h) {
 
 // Some (tweakable) system constants.
 
-#define Dt (0.001) // [s], discrete calculus over time.
-#define DT (0.05) // [K], discrete calculus over temperature.
+#define TYPICAL_Dt (0.001) // [s], discrete calculus over time.
+#define GOTIME_Dt (0.1) // [-], discrete calculus over time when gotiming.
+#define TYPICAL_DT (0.05) // [K], discrete calculus over temperature.
 #define MAX_SIM_t (1000.0) // [s], fail if still simming after this long.
 #define MAX_STARTUP_t (0.25) // [s], worst-case longest startup time.
 #define NEGLIGIBLE_m (0.002) // [kg], assume nothing if <= this.
@@ -1408,7 +1417,7 @@ local void sim_initial(broState* s) {
 // Sets the members of `derivatives` to the current time-derivative of each
 // variable, except `t` is ignored and `ontime` is set to its new state, since it
 // is discrete and does not have a derivative.
-local void sim_diff(broState* s, broRunning* derivatives) {
+local void sim_diff(broState* s, broRunning* rstr derivatives) {
     // Current state variables.
     i32 onfire = s->running.onfire;
     f64 t     = s->running.t;
@@ -1442,7 +1451,9 @@ local void sim_diff(broState* s, broRunning* derivatives) {
     // Assuming combustion gases are ideal:
     //  P*V = m*R*T
     //  P = m*R*T/V
-    f64 P_c = m_g * R_g * T_g / V_c;
+    // Note if we arent burning, we stop simulating cc gases and assume ambient
+    // pressure inside the cc chamber.
+    f64 P_c = (onfire) ? (m_g * R_g * T_g / V_c) : P_a;
     // Note this is assuming an iso-thermal expansion of the cc gases into the
     // space left by the fuel grain eroding. While ideally we might assume
     // adiabatic the difference would be absolutely tiny.
@@ -1478,22 +1489,24 @@ local void sim_diff(broState* s, broRunning* derivatives) {
 
         // Find injector flow rate.
 
+        f64 T_u = T_t;
         f64 P_u = P_t;
         f64 P_d = P_c;
+        f64 T_d = N2O_Tsat(P_d); // since our prop funcs expect temp.
         // If the pressure is outside our approximation input bounds, clamp it
         // to be inside the correct range.
         P_d = br_clamp(P_d, N2O_Pmin, N2O_Pmax);
 
         // Check theres no injector back-flow during a burn.
         if (onfire)
-            assertx(P_t > CUTOFF_Pr * P_c, "P_t=%fPa, P_c=%fPa", P_t, P_c);
+            assertx(P_u > CUTOFF_Pr * P_d, "P_u=%fPa, P_d=%fPa", P_u, P_d);
         // NHEM requires a pressure difference to not crack it.
         if (P_u <= P_d)
             goto NO_INJECTOR_FLOW;
 
         // Single-phase incompressible model (with Beta = 0):
         // (assuming upstream density as the "incompressible" density)
-        f64 rho_u = N2O_rho_satliq(T_t);
+        f64 rho_u = N2O_rho_satliq(T_u);
         f64 dm_SPI = s->Cd_inj * s->A_inj * br_sqrt(2 * rho_u * (P_u - P_d));
 
         // Homogenous equilibrium model:
@@ -1503,8 +1516,7 @@ local void sim_diff(broState* s, broRunning* derivatives) {
         f64 s_d_v = N2O_s_satvap(P_d);
         f64 x_d = (s_u - s_d_l) / (s_d_v - s_d_l);
         assert(0 <= x_d && x_d <= 1.0);
-        f64 h_u = N2O_h_satliq(T_t);
-        f64 T_d = N2O_Tsat(P_d); // since our prop funcs expect temp.
+        f64 h_u = N2O_h_satliq(T_u);
         f64 h_d_l = N2O_h_satliq(T_d);
         f64 h_d_v = N2O_h_satvap(T_d);
         f64 h_d = (1 - x_d) * h_d_l + x_d * h_d_v;
@@ -1609,8 +1621,8 @@ local void sim_diff(broState* s, broRunning* derivatives) {
 
         f64 rho_l = N2O_rho_satliq(T_t);
         f64 rho_v = N2O_rho_satvap(T_t);
-        f64 drhodT_l = (N2O_rho_satliq(T_t + DT) - rho_l) / DT;
-        f64 drhodT_v = (N2O_rho_satvap(T_t + DT) - rho_v) / DT;
+        f64 drhodT_l = (N2O_rho_satliq(T_t + TYPICAL_DT) - rho_l) / TYPICAL_DT;
+        f64 drhodT_v = (N2O_rho_satvap(T_t + TYPICAL_DT) - rho_v) / TYPICAL_DT;
 
         f64 Cv_l = m_l * N2O_cv_satliq(T_t);
         f64 Cv_v = m_v * N2O_cv_satvap(T_t);
@@ -1651,19 +1663,21 @@ local void sim_diff(broState* s, broRunning* derivatives) {
 
         // Find injector flow rate.
 
+        f64 T_u = T_t;
         f64 P_u = P_t;
         f64 P_d = P_c;
         P_d = br_clamp(P_d, N2O_Pmin, N2O_Pmax);
 
         // Check theres no injector back-flow during a burn.
         if (onfire)
-            assertx(P_t > CUTOFF_Pr * P_c, "P_t=%fPa, P_c=%fPa", P_t, P_c);
+            assertx(P_u > CUTOFF_Pr * P_d, "P_u=%fPa, P_d=%fPa", P_u, P_d);
 
         // Technically gamma but use 'y' for file size reduction.
-        f64 y_u = N2O_cp(T_t, P_u) / N2O_cv(T_t, P_u);
+        f64 y_u = N2O_cp(T_u, P_u) / N2O_cv(T_u, P_u);
         // Use compressibility factor to account for non-ideal gas.
-        f64 Z_u = N2O_Z(T_t, rho_v);
+        f64 Z_u = N2O_Z(T_u, rho_v);
 
+        // Use real compressible orifice flow rate.
         dm_inj = hole_dm(&(Hole){
             .Cd = s->Cd_inj,
             .A = s->A_inj,
@@ -1671,7 +1685,7 @@ local void sim_diff(broState* s, broRunning* derivatives) {
             .P_d = P_d,
             .y = y_u,
             .R = N2O_R,
-            .T = T_t,
+            .T = T_u,
             .Z = Z_u,
         });
 
@@ -1681,7 +1695,7 @@ local void sim_diff(broState* s, broRunning* derivatives) {
 
         // Back to the well.
         //  d/dt (U) = -dm_inj * h  [first law of thermodynamics, adiabatic]
-        // using no suffix is the non-saturated vapour in the tank:
+        // using no suffix as the non-saturated vapour in the tank:
         //  d/dt (U_tw + U) = -dm_inj * h
         //  d/dt (m_tw*u_tw) + d/dt (m*u) = -dm_inj * h
         //  -dm_inj * h = dm_tw*u_tw + m_tw*du_tw
@@ -1742,54 +1756,6 @@ local void sim_diff(broState* s, broRunning* derivatives) {
     }
 
 
-    // Instantaneous oxidiser-fuel ratio.
-    f64 ofr = (dm_reg != 0) ? (dm_inj / dm_reg) : 0.0;
-
-    // Change in cc gas properties due to added gas.
-    f64 dm_n = dm_inj + dm_reg; // new gas masses from ox+fuel.
-    f64 T_n;
-    f64 Mw_n;
-    f64 cp_n;
-    f64 cv_n;
-
-    // If ofr too low, (our cea approxes dont work) BUT MORE IMPORTANTLY
-    // combustion would probably stop.
-    if (onfire && ofr >= CEA_ofrmin) {
-        // Just pretend inputs are in bounds even if they arent.
-        f64 P_cea = br_clamp(P_c, CEA_Pmin, CEA_Pmax);
-        f64 ofr_cea = br_clamp(ofr, CEA_ofrmin, CEA_ofrmax);
-
-        // Do cea to find combustion properties.
-        T_n = cea_T_c(P_cea, ofr_cea);
-        Mw_n = cea_Mw_c(P_cea, ofr_cea);
-        cp_n = cea_cp_c(P_cea, ofr_cea);
-        cv_n = cp_n / cea_y_throat(P_cea, ofr_cea);
-
-    } else {
-        // Combustion stops (or had already stopped), if startup is over.
-        if (t > MAX_STARTUP_t)
-            onfire = 0;
-
-        // TODO: dont sim cc gases after combustion stops. the only reason we do
-        //       it now is because we want to still model the oxidiser mass
-        //       leaving (since it affects the trajectory, maybe noticably) but
-        //       we'll find an approximation to model that without needing the
-        //       rest.
-
-
-        // Oxidiser flowing into cc. Note that for one step, unburnt fuel might
-        // also be flowing in (and we arent accounting for its properties), but
-        // after that regression stops bc no combustion so no big deal. Also note
-        // that we assume isothermal mass transfer, so using tank temperature but
-        // with current chamber pressure.
-        f64 T_N2O = br_clamp(T_t, N2O_Tmin, N2O_Tmax);
-        f64 P_N2O = br_clamp(P_c, N2O_Pmin, N2O_Pmax);
-        T_n = T_t;
-        Mw_n = N2O_Mw;
-        cp_n = N2O_cp(T_N2O, P_N2O);
-        cv_n = N2O_cv(T_N2O, P_N2O);
-    }
-
 
     // Do nozzle flow.
     f64 dm_out = hole_dm(&(Hole){
@@ -1804,44 +1770,81 @@ local void sim_diff(broState* s, broRunning* derivatives) {
     });
 
 
-    // Gases accumulating in the chamber is just entering - exiting.
-    f64 dm_g = dm_inj + dm_reg - dm_out;
 
-    // Change in any extensive property for a reservoir with flow in and out:
-    //  d/dt (m*p) = dm_in * p_in - dm_out * p
+    // Do combustion things.
 
-    // Change in moles:
-    //  dn = d/dt (n_n) - d/dt (n_out)
-    //  dn = dm_n / Mw_n - dm_out / Mw
-    f64 dN_g = dm_n / Mw_n - dm_out / Mw_g;
+    f64 Fthrust;
+    f64 dm_g;
+    f64 dN_g;
+    f64 dCp_g;
+    f64 dCv_g;
+    f64 dT_g;
 
-    // Change in specific heats:
-    f64 dCp_g = dm_n * cp_n - dm_out * cp_g;
-    f64 dCv_g = dm_n * cv_n - dm_out * cv_g;
+    // Instantaneous oxidiser-fuel ratio.
+    f64 ofr = (dm_reg != 0.0) ? (dm_inj / dm_reg) : 0.0;
 
-    // Change in temperature:
-    //  d/dt (m * cp * T) = dm_n * cp_n * T_n - dm_out * cp * T
-    //  d/dt (m * cp * T) = dm_n * cp_n * T_n - dm_out * cp * T
-    //  d/dt (m * cp) * T + m*cp * dT = dm_n * cp_n * T_n - dm_out * cp * T
-    //  dCp * T + Cp * dT = dm_n * cp_n * T_n - dm_out * cp * T
-    //  Cp * dT = dm_n * cp_n * T_n - dm_out * cp * T - dCp * T
-    //  dT = (dm_n * cp_n * T_n - dm_out * cp * T - dCp * T) / Cp
-    f64 dT_g = (dm_n * cp_n * T_n - dm_out * cp_g * T_g - dCp_g * T_g) / Cp_g;
-
-
-
-    // Calculate thrust.
-    f64 Fthrust = 0.0;
-    if (onfire) {
-        // Same as earlier, just pretend inputs are in bounds.
+    // During startup, we always assume combustion is occuring. Otherwise, stop
+    // combustion if the ofr is too low, since combustion would probably stop.
+    if (onfire || (t <= MAX_STARTUP_t)) {
+        // Just pretend inputs are in bounds even if they arent.
         f64 P_cea = br_clamp(P_c, CEA_Pmin, CEA_Pmax);
         f64 ofr_cea = br_clamp(ofr, CEA_ofrmin, CEA_ofrmax);
+
+        // Do cea to find new combustion product properties.
+        f64 dm_n = dm_inj + dm_reg;
+        f64 T_n = cea_T_c(P_cea, ofr_cea);
+        f64 Mw_n = cea_Mw_c(P_cea, ofr_cea);
+        f64 cp_n = cea_cp_c(P_cea, ofr_cea);
+        // y = cp / cv  ->  cv = cp / y
+        f64 cv_n = cp_n / cea_y_throat(P_cea, ofr_cea);
         f64 Ivac = cea_Ivac(P_cea, ofr_cea, s->eps);
+
         f64 A_exit = s->eps * s->A_throat;
         Fthrust = dm_out * Ivac * STANDARD_GRAVITY - P_a * A_exit;
         // Pretend it doesnt suck the rocket downwards.
         Fthrust = br_max(Fthrust, 0.0);
+
+        // Net cc gas property changed.
+        dm_g = dm_n - dm_out;
+
+        // Change in any extensive property for a reservoir with flow in and out:
+        //  d/dt (m*p) = dm_in * p_in - dm_out * p
+
+        // Change in moles:
+        //  dn = d/dt (n_n) - d/dt (n_out)
+        //  dn = dm_n / Mw_n - dm_out / Mw
+        dN_g = dm_n / Mw_n - dm_out / Mw_g;
+
+        // Change in specific heats:
+        dCp_g = dm_n * cp_n - dm_out * cp_g;
+        dCv_g = dm_n * cv_n - dm_out * cv_g;
+
+        // Change in temperature:
+        //  d/dt (m * cp * T) = dm_n * cp_n * T_n - dm_out * cp * T
+        //  d/dt (m * cp * T) = dm_n * cp_n * T_n - dm_out * cp * T
+        //  d/dt (m * cp) * T + m*cp * dT = dm_n * cp_n * T_n - dm_out * cp * T
+        //  dCp * T + Cp * dT = dm_n * cp_n * T_n - dm_out * cp * T
+        //  Cp * dT = dm_n * cp_n * T_n - dm_out * cp * T - dCp * T
+        //  dT = (dm_n * cp_n * T_n - dm_out * cp * T - dCp * T) / Cp
+        dT_g = (dm_n * cp_n * T_n - dm_out * cp_g * T_g - dCp_g * T_g) / Cp_g;
+
+        // Assume that combustion stops at <1 ofr.
+        onfire = (ofr >= 1.0);
+
+    } else {
+        // Assume no thrust without combustion (i.e. ignore any pressure-only
+        // thrust).
+        Fthrust = 0.0;
+
+        // Ignore cc gas properties if not combusting.
+        dm_g = 0.0;
+        dN_g = 0.0;
+        dCp_g = 0.0;
+        dCv_g = 0.0;
+        dT_g = 0.0;
     }
+
+
 
     // Calculate drag using the current mach number of the rocket and the drag
     // coefficient calculated from that.
@@ -1866,6 +1869,7 @@ local void sim_diff(broState* s, broRunning* derivatives) {
     f64 dvel_r = (Fthrust + Fdrag + Fgravity) / m_r;
 
 
+
     // Got all state time-dependant derivatives, lets pack it into the return
     // struct.
     derivatives->onfire = onfire;
@@ -1888,6 +1892,11 @@ local void sim_diff(broState* s, broRunning* derivatives) {
 // updated, and one extra round of optional output is set. Returns non-zero if
 // the simulation is complete and should stop.
 local i32 sim_ulate(broState* s) {
+    // If not combusting, can step much much larger.
+    f64 Dt = TYPICAL_Dt;
+    if (!s->running.onfire) // gotime.
+        Dt = GOTIME_Dt;
+
     // Do the four state derivatives that are needed for runge-kutta 4
     // integration.
     broRunning derivatives[4]; // all members are derivatives.
@@ -1898,7 +1907,7 @@ local i32 sim_ulate(broState* s) {
             f64 rk4_Dt = (i == 3) ? Dt : 0.5 * Dt;
             broRunning* d = derivatives + i - 1;
             s->running = (broRunning){
-                .onfire = cur.onfire, // discrete, so just take initial value.
+                .onfire = d->onfire,
                 .t     = cur.t     + rk4_Dt,
                 .T_t   = cur.T_t   + rk4_Dt * d->T_t,
                 .m_l   = cur.m_l   + rk4_Dt * d->m_l,
@@ -1922,7 +1931,7 @@ local i32 sim_ulate(broState* s) {
     broRunning* k2 = derivatives + 1;
     broRunning* k3 = derivatives + 2;
     broRunning* k4 = derivatives + 3;
-    i32 onfire = (k1->onfire | k2->onfire | k3->onfire | k4->onfire);
+    i32 Donfire = (k1->onfire | k2->onfire | k3->onfire | k4->onfire);
     f64 dT_t   = (k1->T_t   + 2*k2->T_t   + 2*k3->T_t   + k4->T_t  ) / 6;
     f64 dm_l   = (k1->m_l   + 2*k2->m_l   + 2*k3->m_l   + k4->m_l  ) / 6;
     f64 dm_v   = (k1->m_v   + 2*k2->m_v   + 2*k3->m_v   + k4->m_v  ) / 6;
@@ -1935,7 +1944,7 @@ local i32 sim_ulate(broState* s) {
     f64 dalt_r = (k1->alt_r + 2*k2->alt_r + 2*k3->alt_r + k4->alt_r) / 6;
     f64 dvel_r = (k1->vel_r + 2*k2->vel_r + 2*k3->vel_r + k4->vel_r) / 6;
 
-    s->running.onfire = onfire;
+    s->running.onfire = Donfire;
     s->running.t     += Dt;
     s->running.T_t   += Dt * dT_t;
     s->running.m_l   += Dt * dm_l;
@@ -1954,6 +1963,7 @@ local i32 sim_ulate(broState* s) {
     if (sim_has_optionals(s)) {
         // Same deduction logic as the genuine sims.
 
+        i32 onfire = s->running.onfire;
         f64 t     = s->running.t;
         f64 T_t   = s->running.T_t;
         f64 m_l   = s->running.m_l;
@@ -1967,7 +1977,15 @@ local i32 sim_ulate(broState* s) {
         f64 alt_r = s->running.alt_r;
         f64 vel_r = s->running.vel_r;
 
-        f64 P_t = N2O_Psat(T_t);
+        f64 P_t = 0.0;
+        if (m_l > NEGLIGIBLE_m) {
+            P_t = N2O_Psat(T_t);
+        } else if (m_v > NEGLIGIBLE_m) {
+            f64 rho_v = m_v / s->V_t;
+            f64 rhosat_v = N2O_rho_satvap(T_t);
+            rho_v = br_clamp(rho_v, N2O_rhomin, rhosat_v);
+            P_t = N2O_P(T_t, rho_v);
+        }
 
         f64 P_a = amb_P(alt_r);
 
@@ -1999,7 +2017,7 @@ local i32 sim_ulate(broState* s) {
         f64 ofr = (dm_reg != 0.0) ? (dm_inj / dm_reg) : 0.0;
 
         f64 Fthrust = 0.0;
-        if (cur.onfire) { // if was onfire.
+        if (onfire) {
             f64 P_cea = br_clamp(P_c, CEA_Pmin, CEA_Pmax);
             f64 ofr_cea = br_clamp(ofr, CEA_ofrmin, CEA_ofrmax);
             f64 Ivac = cea_Ivac(P_cea, ofr_cea, s->eps);
@@ -2013,6 +2031,26 @@ local i32 sim_ulate(broState* s) {
         f64 Fdrag = -0.5 * amb_rho(alt_r) * vel_r*vel_r * CD_r * s->A_r;
 
         f64 Fgravity = -m_r * amb_g(alt_r);
+
+        // cc gases + combustion not simmed after combustion stops, so set to
+        // nan. Note that a lot of things are zero after cc stops, but that is
+        // because they are genuinely zero whereas these properties are just
+        // unknown.
+        if (!onfire) {
+            m_g = UNSET;
+            N_g = UNSET;
+            T_g = UNSET;
+            Cp_g = UNSET;
+            Cv_g = UNSET;
+            y_g = UNSET;
+            cp_g = UNSET;
+            cv_g = UNSET;
+            Mw_g = UNSET;
+            R_g = UNSET;
+            P_c = UNSET;
+            dm_out = UNSET;
+            Fthrust = UNSET;
+        }
 
         sim_set_optionals(s, &(Optionals){
             .t=t,
