@@ -64,6 +64,7 @@
 // ofr = oxidiser-fuel ratio.
 // P = pressure.
 // Pr = pressure ratio.
+// PCPP = pre-combustion chamber pressure proportion.
 // Pcrit = critical point pressure.
 // Psat = saturated pressure.
 // Ptrip = triple point pressure.
@@ -156,6 +157,7 @@ typedef struct broState {
     Input rho_cw;
     Input Ys_cw;
     Input sf_cw;
+    Input PCPP;
     Output L_c;
     Output Vempty_c;
     Output m_cw;
@@ -206,6 +208,7 @@ typedef struct broState {
     Output* restrict out_y_g;
     Output* restrict out_R_g;
     Output* restrict out_ofr;
+    Output* restrict out_Isp;
     Output* restrict out_Fthrust;
     Output* restrict out_Fdrag;
     Output* restrict out_Fgravity;

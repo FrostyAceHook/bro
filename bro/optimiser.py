@@ -140,6 +140,7 @@ output variables are swept over a range and the optimal choice is kept.
         s.combustion_chamber_wall_density = INPUT # [kg/m^3]
         s.combustion_chamber_wall_yield_strength = INPUT # [Pa]
         s.combustion_chamber_wall_safety_factor = INPUT # [-]
+        s.pre_combustion_chamber_pressure_proportion = INPUT # [-]
 
         s.fuel_length = OUTPUT # [m]
         s.fuel_initial_thickness = OUTPUT # [m]
@@ -260,6 +261,7 @@ def cost(s):
     y_g      = np.empty(10_000_000, dtype=np.float64)
     R_g      = np.empty(10_000_000, dtype=np.float64)
     ofr      = np.empty(10_000_000, dtype=np.float64)
+    Isp      = np.empty(10_000_000, dtype=np.float64)
     Fthrust  = np.empty(10_000_000, dtype=np.float64)
     Fdrag    = np.empty(10_000_000, dtype=np.float64)
     Fgravity = np.empty(10_000_000, dtype=np.float64)
@@ -289,6 +291,7 @@ def cost(s):
         y_g=y_g,
         R_g=R_g,
         ofr=ofr,
+        Isp=Isp,
         Fthrust=Fthrust,
         Fdrag=Fdrag,
         Fgravity=Fgravity,
@@ -318,6 +321,7 @@ def cost(s):
         rho_cw=s.combustion_chamber_wall_density,
         Ys_cw=s.combustion_chamber_wall_yield_strength,
         sf_cw=s.combustion_chamber_wall_safety_factor,
+        PCPP=s.pre_combustion_chamber_pressure_proportion,
         L_f=s.fuel_length,
         th0_f=s.fuel_initial_thickness,
         Cd_nzl=s.nozzle_discharge_coefficient,
@@ -354,6 +358,7 @@ def cost(s):
     y_g      = y_g[:count]
     R_g      = R_g[:count]
     ofr      = ofr[:count]
+    Isp      = Isp[:count]
     Fthrust  = Fthrust[:count]
     Fdrag    = Fdrag[:count]
     Fgravity = Fgravity[:count]
@@ -372,18 +377,23 @@ def cost(s):
             s += "." * (25 - len(s))
             print(f"{s} {array[-1]:,}")
 
+    thrust = Fthrust.copy()
+    thrust[np.isnan(thrust)] = 0.0
+    print(f"Apogee: {np.max(alt_r)/1e3:,.3f} km")
+    print(f"Total impulse: {np.trapz(thrust, t):,.1f} Ns")
+
     plotme = [
             # data, title, ylabel, y_lower_limit_as_zero
         [
             (alt_r*1e-3, "Altitude", "Altitude [km]", False),
             (vel_r, "Velocity", "Speed [m/s]", False),
             (Fthrust, "Thrust", "Force [N]", False),
-            (Fdrag, "Drag", "Force [N]", False),
+            (Isp, "Specific Impulse", "Isp [s]", False),
             (P_t, "Tank pressure", "Pressure [Pa]", False),
             (P_c, "CC pressure", "Pressure [Pa]", False),
             (T_t - 273.15, "Tank temperature", "Temperature [dC]", False),
             (T_g, "CC temperature", "Temperature [K]", False),
-            (ofr, "Oxidiser-fuel ratio", "Ratio [-]", False),
+            (ofr, "Oxidiser-fuel ratio", "OFR [-]", False),
             (dm_out, "Exhaust mass flow rate", "Mass flow rate [kg/s]", True),
             (dm_inj, "Injector mass flow rate", "Mass flow rate [kg/s]", True),
             (dm_reg, "Regression mass flow rate", "Mass flow rate [kg/s]", True),
@@ -393,14 +403,15 @@ def cost(s):
         [
             (acc_r, "Rocket acceleration", "Acceleration [m/s^2]", False),
             (m_r, "Rocket mass", "Mass [kg]", False),
-            (P_a, "Atmospheric pressure", "Pressure [Pa]", False),
+            (Fdrag, "Drag", "Force [N]", False),
             (Fgravity, "Gravity", "Force [N]", False),
             (m_l, "Tank liquid mass", "Mass [kg]", True),
             (m_v, "Tank vapour mass", "Mass [kg]", True),
+            (P_a, "Atmospheric pressure", "Pressure [Pa]", False),
             (m_g, "CC gas mass", "Mass [kg]", False),
             (cp_g, "CC gas cp", "Specific heat capacity [J/kg/K]", False),
             (cv_g, "CC gas cv", "Specific heat capacity [J/kg/K]", False),
-            (y_g, "CC gas gamma", "Ratio [-]", False),
+            (y_g, "CC gas gamma", "Specific heat ratio [-]", False),
             (R_g, "CC gas R", "[J/kg/K]", False),
         ],
         # [
@@ -428,8 +439,10 @@ def cost(s):
             plt.title(title)
             plt.xlabel("Time [s]")
             plt.ylabel(ylabel)
-            plt.grid()
-            plt.xlim(0, t.max())
+            plt.grid(which="major", linestyle="-", linewidth=0.8, alpha=0.7)
+            plt.grid(which="minor", linestyle=":", linewidth=0.5, alpha=0.5)
+            plt.minorticks_on()
+            plt.xlim(-1, t.max() + 1)
             if snapzero:
                 _, ymax = plt.ylim()
                 plt.ylim(0, ymax)

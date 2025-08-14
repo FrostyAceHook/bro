@@ -27,7 +27,6 @@ def main():
 
     s.ambient_temperature = 25 + 273.15 # [K]
 
-    s.tank_interior_length = 600e-3 # [m] OUTPUT
     s.tank_wall_density = 2720.0 # [kg/m^3] Al6061
     s.tank_wall_yield_strength = 241e6 # [Pa] Al6061
     s.tank_wall_specific_heat_capacity = 896 # [J/kg/K] Al6061
@@ -42,21 +41,26 @@ def main():
     s.injector_length = 20e-3 # [m]
     s.injector_com = 10e-3 # [m]
     s.injector_discharge_coefficient = 0.8 # [-]
-    s.injector_orifice_area = 70 * pi/4 * 0.5e-3**2 # [m^2] OUTPUT
 
-    s.combustion_chamber_diameter = 80e-3 # [m] OUTPUT
     s.combustion_chamber_wall_density = 2720.0 # [kg/m^3] Al6061
     s.combustion_chamber_wall_yield_strength = 241e6 # [Pa] Al6061
     s.combustion_chamber_wall_safety_factor = 3.5 # [-]
-
-    s.fuel_length = 300e-3 # [m] OUTPUT
-    s.fuel_initial_thickness = 25e-3 # [m] OUTPUT
+    s.pre_combustion_chamber_pressure_proportion = 0.8 # [-]
 
     s.nozzle_discharge_coefficient = 0.8 # [-]
-    s.exit_area_to_throat_area_ratio = 4.0 # [-] OUTPUT
-    s.throat_area = pi/4 * 30e-3**2 # [m^2] OUTPUT
+
+    # OUTPUTS:
+    s.tank_interior_length = 600e-3 # [m]
+    s.injector_orifice_area = 35 * pi/4 * 1.5e-3**2 # [m^2]
+    s.combustion_chamber_diameter = 90e-3 # [m]
+    s.fuel_length = 200e-3 # [m]
+    s.fuel_initial_thickness = 20e-3 # [m]
+    s.exit_area_to_throat_area_ratio = 4.0 # [-]
+    s.throat_area = pi/4 * 30e-3**2 # [m^2]
 
     optimiser.cost(s)
+
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

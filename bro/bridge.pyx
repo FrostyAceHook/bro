@@ -53,6 +53,7 @@ cdef extern from "sim.h":
         double rho_cw;
         double Ys_cw;
         double sf_cw;
+        double PCPP;
         double L_c;
         double Vempty_c;
         double m_cw;
@@ -94,6 +95,7 @@ cdef extern from "sim.h":
         double* out_y_g;
         double* out_R_g;
         double* out_ofr;
+        double* out_Isp;
         double* out_Fthrust;
         double* out_Fdrag;
         double* out_Fgravity;
@@ -131,6 +133,7 @@ cdef class State:
                 np.ndarray[np.float64_t, mode="c"] y_g=None,
                 np.ndarray[np.float64_t, mode="c"] R_g=None,
                 np.ndarray[np.float64_t, mode="c"] ofr=None,
+                np.ndarray[np.float64_t, mode="c"] Isp=None,
                 np.ndarray[np.float64_t, mode="c"] Fthrust=None,
                 np.ndarray[np.float64_t, mode="c"] Fdrag=None,
                 np.ndarray[np.float64_t, mode="c"] Fgravity=None,
@@ -159,6 +162,7 @@ cdef class State:
                 double rho_cw,
                 double Ys_cw,
                 double sf_cw,
+                double PCPP,
                 double L_f,
                 double th0_f,
                 double Cd_nzl,
@@ -193,6 +197,7 @@ cdef class State:
         min_size = new_min_size(y_g)
         min_size = new_min_size(R_g)
         min_size = new_min_size(ofr)
+        min_size = new_min_size(Isp)
         min_size = new_min_size(Fthrust)
         min_size = new_min_size(Fdrag)
         min_size = new_min_size(Fgravity)
@@ -222,6 +227,7 @@ cdef class State:
         self.obj.out_y_g      = NULL if y_g      is None else <double*>y_g.data
         self.obj.out_R_g      = NULL if R_g      is None else <double*>R_g.data
         self.obj.out_ofr      = NULL if ofr      is None else <double*>ofr.data
+        self.obj.out_Isp      = NULL if Isp      is None else <double*>Isp.data
         self.obj.out_Fthrust  = NULL if Fthrust  is None else <double*>Fthrust.data
         self.obj.out_Fdrag    = NULL if Fdrag    is None else <double*>Fdrag.data
         self.obj.out_Fgravity = NULL if Fgravity is None else <double*>Fgravity.data
@@ -250,6 +256,7 @@ cdef class State:
         self.obj.rho_cw = rho_cw
         self.obj.Ys_cw = Ys_cw
         self.obj.sf_cw = sf_cw
+        self.obj.PCPP = PCPP
         self.obj.L_f = L_f
         self.obj.th0_f = th0_f
         self.obj.Cd_nzl = Cd_nzl
