@@ -1,3 +1,9 @@
+MOVED
+=====
+BRO repo has been moved to ares-rocketry/bro.
+This repo may or may not be kept up-to-date with that repo.
+
+
 BRO - the Big Rocket Optimiser
 ==============================
 
